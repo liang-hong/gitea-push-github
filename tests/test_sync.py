@@ -5,6 +5,7 @@
 运行：python3 -m unittest discover -s tests -v
 """
 
+import base64
 import io
 import json
 import os
@@ -42,6 +43,10 @@ def make_http_error(code, payload):
 
 def fake_urlopen(side_effect):
     return mock.patch.object(urllib.request, "urlopen", side_effect=side_effect)
+
+
+def encode_file(text):
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
 class CredentialsTest(unittest.TestCase):
@@ -90,24 +95,24 @@ github:
   enabled: true
   private: false
 """
-        cfg = sync._parse_yaml_min(text)
+        cfg = sync.parse_repo_config_text(text)
         self.assertTrue(cfg["github"]["enabled"])
         self.assertFalse(cfg["github"]["private"])
 
     def test_min_parser_inline_comment(self):
         text = "github:\n  enabled: true  # 启用\n  private: true\n"
-        cfg = sync._parse_yaml_min(text)
+        cfg = sync.parse_repo_config_text(text)
         self.assertTrue(cfg["github"]["enabled"])
 
     def test_defaults_private_true(self):
         text = "github:\n  enabled: true\n"
-        cfg = sync._parse_yaml_min(text)
+        cfg = sync.parse_repo_config_text(text)
         self.assertTrue(sync.config_enabled(cfg))
         self.assertTrue(sync.config_private(cfg))  # 默认私有
 
     def test_disabled_by_default(self):
         text = "github:\n  enabled: false\n"
-        cfg = sync._parse_yaml_min(text)
+        cfg = sync.parse_repo_config_text(text)
         self.assertFalse(sync.config_enabled(cfg))
 
 
@@ -122,6 +127,12 @@ class SyncMainTest(unittest.TestCase):
                 "GITEA_API_URL=https://git.example.com\n"
                 "GITEA_TOKEN=gitea_tok\n"
             )
+        # 避免读取到本机真实默认凭据文件
+        self.patch_default = mock.patch.object(sync, "DEFAULT_CREDENTIALS", "/nonexistent/path")
+        self.patch_default.start()
+
+    def tearDown(self):
+        self.patch_default.stop()
 
     def write_config(self, text):
         path = os.path.join(self.tmp, ".github-sync.yml")
@@ -129,24 +140,16 @@ class SyncMainTest(unittest.TestCase):
             handle.write(text)
         return path
 
-    def test_disabled_does_not_call_api(self):
+    def base_args(self):
+        return ["--repo-owner", "alice", "--credentials", self.creds]
+
+    def test_single_repo_disabled_local_config(self):
         config = self.write_config("github:\n  enabled: false\n")
         with fake_urlopen(side_effect=AssertionError("不应发起 API 调用")):
-            rc = sync.main(
-                ["--repo-owner", "alice", "--repo-name", "repo",
-                 "--credentials", self.creds, "--config", config]
-            )
+            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
         self.assertEqual(rc, 0)
 
-    def test_missing_config_is_disabled(self):
-        with fake_urlopen(side_effect=AssertionError("不应发起 API 调用")):
-            rc = sync.main(
-                ["--repo-owner", "alice", "--repo-name", "repo",
-                 "--credentials", self.creds, "--config", "/nonexistent/.github-sync.yml"]
-            )
-        self.assertEqual(rc, 0)
-
-    def test_enabled_creates_private_repo_and_mirror(self):
+    def test_single_repo_enabled_local_config_creates_private(self):
         config = self.write_config("github:\n  enabled: true\n")
         calls = []
 
@@ -163,30 +166,53 @@ class SyncMainTest(unittest.TestCase):
                 return make_response(200, [])
             if request.method == "POST" and "push_mirrors" in url:
                 body = json.loads(request.data)
-                self.assertEqual(
-                    body["remote_address"], "https://github.com/octocat/repo.git"
-                )
+                self.assertEqual(body["remote_address"], "https://github.com/octocat/repo.git")
                 return make_response(201, {})
             raise AssertionError(f"unexpected {request.method} {url}")
 
         with fake_urlopen(side_effect=handler):
-            rc = sync.main(
-                ["--repo-owner", "alice", "--repo-name", "repo",
-                 "--credentials", self.creds, "--config", config]
-            )
+            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
         self.assertEqual(rc, 0)
         self.assertEqual(sum(1 for c in calls if c.method == "POST"), 2)
 
-    def test_private_false_creates_public(self):
-        config = self.write_config("github:\n  enabled: true\n  private: false\n")
+    def test_single_repo_existing_skipped(self):
+        config = self.write_config("github:\n  enabled: true\n")
 
         def handler(request, **kwargs):
             url = request.full_url
             if request.method == "GET" and "/repos/octocat/repo" in url and "api.github.com" in url:
+                return make_response(200, {"full_name": "octocat/repo"})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [{"remote_address": "https://github.com/octocat/repo.git"}])
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
+        self.assertEqual(rc, 0)
+
+
+    def test_single_repo_config_via_api_disabled(self):
+        # 无 --config：通过 Gitea API 读取 .github-sync.yml，404 = 未启用
+        def handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and "/contents/.github-sync.yml" in url:
+                raise make_http_error(404, {"message": "Not Found"})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo"])
+        self.assertEqual(rc, 0)
+
+    def test_single_repo_config_via_api_enabled(self):
+        def handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and "/contents/.github-sync.yml" in url:
+                return make_response(200, {"content": encode_file("github:\n  enabled: true\n")})
+            if request.method == "GET" and "/repos/octocat/repo" in url and "api.github.com" in url:
                 raise make_http_error(404, {"message": "Not Found"})
             if request.method == "POST" and url == "https://api.github.com/user/repos":
                 body = json.loads(request.data)
-                self.assertFalse(body["private"])
+                self.assertTrue(body["private"])
                 return make_response(201, {"name": body["name"]})
             if request.method == "GET" and "push_mirrors" in url:
                 return make_response(200, [])
@@ -195,40 +221,72 @@ class SyncMainTest(unittest.TestCase):
             raise AssertionError(f"unexpected {request.method} {url}")
 
         with fake_urlopen(side_effect=handler):
-            rc = sync.main(
-                ["--repo-owner", "alice", "--repo-name", "repo",
-                 "--credentials", self.creds, "--config", config]
-            )
+            rc = sync.main(self.base_args() + ["--repo-name", "repo"])
         self.assertEqual(rc, 0)
 
-    def test_existing_repo_and_mirror_skipped(self):
-        config = self.write_config("github:\n  enabled: true\n")
+    def test_scan_all_skips_special_and_disabled(self):
+        repos = [
+            {"name": "empty-repo", "empty": True, "archived": False, "mirror": False},
+            {"name": "archived-repo", "empty": False, "archived": True, "mirror": False},
+            {"name": "mirror-repo", "empty": False, "archived": False, "mirror": True},
+            {"name": "disabled-repo", "empty": False, "archived": False, "mirror": False},
+        ]
 
         def handler(request, **kwargs):
             url = request.full_url
-            if request.method == "GET" and "/repos/octocat/repo" in url and "api.github.com" in url:
-                return make_response(200, {"full_name": "octocat/repo"})
-            if request.method == "GET" and "push_mirrors" in url:
-                return make_response(
-                    200, [{"remote_address": "https://github.com/octocat/repo.git"}]
-                )
+            if request.method == "GET" and "/users/alice/repos" in url:
+                return make_response(200, repos)
+            if request.method == "GET" and "/contents/.github-sync.yml" in url:
+                # disabled-repo 无配置 -> 404
+                raise make_http_error(404, {"message": "Not Found"})
             raise AssertionError(f"unexpected {request.method} {url}")
 
         with fake_urlopen(side_effect=handler):
-            rc = sync.main(
-                ["--repo-owner", "alice", "--repo-name", "repo",
-                 "--credentials", self.creds, "--config", config]
-            )
+            rc = sync.main(self.base_args())
         self.assertEqual(rc, 0)
+
+    def test_scan_all_creates_for_enabled(self):
+        repos = [
+            {"name": "disabled-repo", "empty": False, "archived": False, "mirror": False},
+            {"name": "enabled-repo", "empty": False, "archived": False, "mirror": False},
+        ]
+
+        def handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and "/users/alice/repos" in url:
+                return make_response(200, repos)
+            if request.method == "GET" and "/contents/.github-sync.yml" in url:
+                if "enabled-repo" in url:
+                    return make_response(200, {"content": encode_file("github:\n  enabled: true\n")})
+                raise make_http_error(404, {"message": "Not Found"})
+            if request.method == "GET" and "/repos/octocat/enabled-repo" in url and "api.github.com" in url:
+                raise make_http_error(404, {"message": "Not Found"})
+            if request.method == "POST" and url == "https://api.github.com/user/repos":
+                return make_response(201, {"name": json.loads(request.data)["name"]})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            if request.method == "POST" and "push_mirrors" in url:
+                return make_response(201, {})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args())
+        self.assertEqual(rc, 0)
+
+    def test_missing_owner_fails(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(SystemExit):
+                sync.main(["--credentials", self.creds])
 
     def test_missing_credentials_fails(self):
         config = self.write_config("github:\n  enabled: true\n")
         missing_creds = os.path.join(self.tmp, "missing.env")
-        with self.assertRaises(SystemExit):
-            sync.main(
-                ["--repo-owner", "alice", "--repo-name", "repo",
-                 "--credentials", missing_creds, "--config", config]
-            )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(SystemExit):
+                sync.main(
+                    ["--repo-owner", "alice", "--repo-name", "repo",
+                     "--credentials", missing_creds, "--config", config]
+                )
 
 
 if __name__ == "__main__":
