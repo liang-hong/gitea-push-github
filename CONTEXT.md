@@ -304,7 +304,20 @@ github_pat_xxxxxxxxx
 Stored using:
 
 ```text
-Woodpecker Secrets
+Local credential file on the server:
+~/.config/gitea-push-github/gitea-push-github.env (mode 600)
+```
+
+Mounted read-only into pipeline containers at:
+
+```text
+/run/secrets/gitea-push-github/gitea-push-github.env
+```
+
+Optional fallback:
+
+```text
+Woodpecker Secrets (environment variables)
 ```
 
 Not stored:
@@ -322,7 +335,13 @@ Gitea API Token
 Stored using:
 
 ```text
-Woodpecker Secret
+Local credential file on the server (same file as above)
+```
+
+Optional fallback:
+
+```text
+Woodpecker Secret (environment variable)
 ```
 
 ---
@@ -488,4 +507,30 @@ Test cases:
 
 ---
 
+## 14. Solution Refinements (2026-08-18)
+
+The original plan above is kept as-is for historical context. The following refinements were applied to the implementation (code/config/docs; deployment is pending testing):
+
+### 14.1 Provisioning: auto-inject `.woodpecker.yml` into repositories that lack it
+
+- New tool `provision/add_woodpecker_yml.py` scans a Gitea owner's repositories via the Gitea API and creates `.woodpecker.yml` (from `templates/woodpecker.yml`) in every repository that does not already have one.
+- Idempotent: existing files are skipped; empty/archived/mirror repositories are skipped.
+- Supports `--dry-run`, `--owner`, `--repo`, `--exclude`, and template placeholder substitution (`{{SYNC_IMAGE}}`, `{{SECRETS_MOUNT}}`).
+
+### 14.2 Safe defaults: no sync by default, private by default
+
+- The injected `.woodpecker.yml` does **not** sync by default. The pipeline step always runs but the sync tool exits 0 immediately unless the repository root contains `.github-sync.yml` with `github.enabled: true` (see `examples/github-sync.yml`).
+- When a GitHub repository is created, it is **private by default** (`github.private` defaults to `true`); set `github.private: false` to create it public.
+
+### 14.3 Credentials live in a local file, never in repositories
+
+- GitHub PAT and Gitea API Token are stored only in `~/.config/gitea-push-github/gitea-push-github.env` (mode 600) on the server.
+- Pipeline steps mount that file read-only into `/run/secrets/gitea-push-github/`, and the sync tool reads credentials from it (Woodpecker Secrets / environment variables remain an optional fallback).
+- `.gitignore` now ignores `*.env` / `.env` to prevent accidental commits.
+
+### 14.4 Tests
+
+- `tests/test_sync.py` and `tests/test_provision.py` cover credential loading, config parsing (incl. built-in minimal YAML fallback), private-by-default creation, idempotent skip paths, and provisioning behavior with mocked HTTP. Run with `python3 -m unittest discover -s tests`.
+
 # End of Context
+
