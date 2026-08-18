@@ -1,0 +1,7 @@
+# Gitea -> GitHub 自动镜像：定期全量扫描（方案 A，无需 CI）
+#
+# 安装：crontab -e 追加以下行（替换 <owner> 与脚本绝对路径）：
+#
+#   每 10 分钟扫描一次，为新仓库补齐 GitHub 云端仓库与 Gitea Push Mirror。
+#   已配置好的仓库由 Gitea Push Mirror（sync_on_commit）即时自动同步。
+*/10 * * * * /usr/bin/python3 /path/to/gitea-push-github/sync/gitea_github_sync.py --repo-owner <owner> >> /var/log/gitea-push-github.log 2>&1
