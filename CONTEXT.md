@@ -532,5 +532,24 @@ The original plan above is kept as-is for historical context. The following refi
 
 - `tests/test_sync.py` and `tests/test_provision.py` cover credential loading, config parsing (incl. built-in minimal YAML fallback), private-by-default creation, idempotent skip paths, and provisioning behavior with mocked HTTP. Run with `python3 -m unittest discover -s tests`.
 
+## 15. Architecture Revision: no-CI (2026-08-18)
+
+Following a research review, the architecture was simplified further on branch `no-ci`: **all CI/CD components were removed** (no Woodpecker server/agent, no Gitea Actions runner). The design now relies entirely on official platform capabilities plus one idempotent script.
+
+### 15.1 What changed
+
+- **Removed**: `deploy/docker-compose.yml` (Woodpecker stack), `provision/` injection tool, `templates/woodpecker.yml`, root `.woodpecker.yml`, `sync/Dockerfile`.
+- **Kept as the sync backbone**: Gitea native Push Mirror with `sync_on_commit=true` + periodic fallback (`8h0m0s`). Once configured, every push is mirrored instantly by Gitea itself, with no external service.
+- **New single entry point** `sync/gitea_github_sync.py` supports two modes:
+  - scan-all (`--repo-owner` only) for cron-based periodic idempotent reconciliation;
+  - single-repo (`--repo-name`) for post-receive hooks.
+- **Per-repo config** `.github-sync.yml` is read through the Gitea API (base64 contents endpoint) when no local `--config` is given. Missing file or `enabled != true` → skip (default no-sync). `private` defaults to `true`.
+- **Credentials** remain in the local file `~/.config/gitea-push-github/gitea-push-github.env` (mode 600); never stored in repositories.
+- **New templates**: `templates/post-receive.sh` (Gitea post-receive hook) and `examples/crontab.txt`.
+
+### 15.2 Rationale
+
+GitHub does not support creating repositories on push, so a small idempotent "ensure" step is unavoidable; however the continuous sync needs no CI at all. A cron scan or a post-receive hook (both official capabilities) is sufficient and simpler to operate than a CI system.
+
 # End of Context
 
