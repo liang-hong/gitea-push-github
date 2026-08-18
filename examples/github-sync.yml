@@ -1,0 +1,11 @@
+# 仓库级 Gitea -> GitHub 同步配置示例
+#
+# 用法：复制本文件为目标仓库根目录的 .github-sync.yml，并按需修改。
+#
+# 默认行为（安全优先）：
+#   - 仓库缺少本文件，或 github.enabled != true 时，【不同步】到 GitHub；
+#   - 启用同步后，GitHub 云端仓库默认【私有】；
+#     如需公开，显式设置 github.private: false。
+github:
+  enabled: false   # true 才启用同步；默认 false
+  private: true    # GitHub 云端仓库可见性（创建时生效）；默认 true

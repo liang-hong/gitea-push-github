@@ -1,15 +1,15 @@
 # =====================================================================
-# GitHub 自动同步流水线模板（Gitea -> GitHub Push Mirror 管理）
+# 本仓库自身的 Gitea -> GitHub 同步流水线（手工复制示例）
 #
-# 使用方法：
-#   1. 将本文件复制到需要同步到 GitHub 的 Gitea 仓库根目录。
-#   2. 将 image 替换为实际构建并推送的同步工具镜像地址（见 README 第 6 节）。
-#   3. 在 Woodpecker 中为该仓库配置 Secrets（见 README 第 7 节）：
-#        github_username, github_token, gitea_api_url, gitea_token
-#   4. push 到 Gitea 后，Woodpecker 自动完成：
-#        GitHub 仓库检查/创建 + Gitea Push Mirror 检查/创建
+# 注意：provision 工具注入目标仓库使用的是 templates/woodpecker.yml；
+#       本文件是模板的“已填充”示例，仅用于本仓库自身或手工复制。
 #
-# 默认不同步：只有包含本文件且配置了 Secrets 的仓库才会触发同步。
+# 默认不同步：仓库根目录未提供 .github-sync.yml（或 enabled != true）时跳过。
+# GitHub 云端仓库默认私有（.github-sync.yml 中 github.private 可覆盖）。
+#
+# 使用前请修改以下两处为本机实际值：
+#   image         已构建并推送的同步工具镜像（见 README「构建并推送同步工具镜像」）
+#   SECRETS_MOUNT 宿主机上存放 gitea-push-github.env 的目录（只读挂载）
 # =====================================================================
 
 when:
@@ -18,19 +18,8 @@ when:
 steps:
   github-sync:
     image: ghcr.io/<your-account>/gitea-github-sync:latest
-    environment:
-      GITHUB_USERNAME:
-        from_secret: github_username
-      GITHUB_TOKEN:
-        from_secret: github_token
-      GITEA_API_URL:
-        from_secret: gitea_api_url
-      GITEA_TOKEN:
-        from_secret: gitea_token
-      # 可选：需要创建私有仓库时，取消下面注释并在 Woodpecker 中
-      # 添加 github_private secret（值 true/false）
-      # GITHUB_PRIVATE:
-      #   from_secret: github_private
+    volumes:
+      - /home/<your-user>/.config/gitea-push-github:/run/secrets/gitea-push-github:ro
     commands:
       # 注意：Woodpecker 会预处理参数表达式，内置变量需用 $$ 转义
       - gitea_github_sync.py --repo-owner "$${CI_REPO_OWNER}" --repo-name "$${CI_REPO_NAME}"
