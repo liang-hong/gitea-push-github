@@ -1,6 +1,6 @@
 # Gitea → GitHub 自动推送镜像管理（零 CI 方案）
 
-**注意：本仓库完全由AI生成，使用deepseek:deepseek-v4-flash模型和vscode cline插件。仓库仅在个人使用场景正常部署运行，不适用且未验证团队和生产环境使用稳定性**
+**注意：本仓库完全由AI生成，使用deepseek:deepseek-v4-flash模型和vscode cline插件。仓库仅在个人使用场景和平台（Ubuntu 20.04 x64）正常部署运行，不适用且未验证团队和生产环境使用稳定性**
 
 基于 **Gitea 官方 Push Mirror + GitHub 官方 API** 的自动化备份方案，**不需要任何 CI/CD 组件**：
 
@@ -82,7 +82,7 @@ Gitea（本地主仓库）
 
 1. 读取仓库主目录 `.github-sync.yml`（固定位置/文件名，经 Gitea API）；
 2. 多分支仓库：仅当全部分支都有该文件且内容一致（忽略注释）时才执行策略，否则按 `disable` 处理（不报错）；
-3. `state: enable` → 检查/创建 GitHub 仓库并**收敛可见性**（PATCH）、按配置**收敛默认分支**（Gitea + GitHub PATCH），检查/创建 Push Mirror；
+3. `state: enable` → 检查/创建 GitHub 仓库并**收敛可见性**（PATCH）、按配置**收敛默认分支**（Gitea + GitHub PATCH）、**description 与 Gitea 一致**，检查/创建 Push Mirror；
 4. `state: suspend` → 删除指向本方案 GitHub 仓库的 Push Mirror（保留 GitHub 仓库，停止更新）；
 5. `state: remove` / `disable`（缺省）→ 不创建也不删除任何内容。
 
@@ -153,7 +153,7 @@ github:
 
 | state | 行为 |
 | ---- | ---- |
-| `enable` | 创建/补齐：GitHub 无同名仓库则创建（默认私有）；已存在则按配置**收敛可见性与默认分支**（PATCH，Gitea 侧同步）；Push Mirror 缺失则创建（保留已存在者） |
+| `enable` | 创建/补齐：GitHub 无同名仓库则创建（默认私有，**description 与 Gitea 一致**）；已存在则按配置**收敛可见性/默认分支/描述**（PATCH，Gitea 侧同步默认分支）；Push Mirror 缺失则创建（保留已存在者） |
 | `suspend` | 停止更新：删除指向本方案 GitHub 仓库的 Gitea Push Mirror；GitHub 仓库保留不删 |
 | `remove` / `disable` | 不受管理：不创建也不删除 GitHub 仓库 / Push Mirror（二者等同） |
 
@@ -239,6 +239,7 @@ git push origin main
 - **退出管理**：`state: remove`（或 `disable`，或删除该文件）→ 已有 GitHub 仓库与 Push Mirror 均不会被删除或修改，脚本不报错；
 - **修改可见性**：改 `private` 后 push，`enable` 状态下脚本会 PATCH 收敛；
 - **修改默认分支**：改 `default_branch` 后 push，`enable` 状态下脚本会同时 PATCH Gitea 与 GitHub 的默认分支；
+- **修改描述**：改 Gitea 仓库 description 后 push，`enable` 状态下脚本会把 GitHub 的 description（About）收敛为一致；
 - **验证**：查看脚本日志（`/var/log/gitea-push-github.log`）与 Gitea 仓库“推送镜像”设置页。
 
 ## 6. 同步工具说明
@@ -254,7 +255,7 @@ git push origin main
 | 1 | 读取各分支 `.github-sync.yml` | 缺失/不一致 → 等同 `disable`（不报错）；`state` 非法 → 报错（退出码 1） |
 | 2 | GitHub `GET /repos/{owner}/{repo}` | 200 已存在：`private` 与配置不一致 → PATCH 收敛；404 进入创建 |
 | 3 | GitHub `POST /user/repos` | 仅当第 2 步返回 404 时执行；`private` 取配置（默认 `true`） |
-| 4 | GitHub `PATCH /repos/{owner}/{repo}` | 仅当第 2 步 200 且可见性或默认分支与配置不一致时执行 |
+| 4 | GitHub `PATCH /repos/{owner}/{repo}` | 仅当第 2 步 200 且可见性、默认分支或 description 与配置/Gitea 不一致时执行 |
 | 5 | Gitea `PATCH /repos/{owner}/{repo}` | 配置了 `default_branch` 且与 Gitea 当前默认分支不一致时执行 |
 | 6 | Gitea `GET .../push_mirrors` | 列表含目标地址即视为已存在 |
 | 7 | Gitea `POST .../push_mirrors` | 仅当第 6 步未命中时执行 |
