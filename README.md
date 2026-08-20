@@ -42,7 +42,8 @@
 
 **默认行为（安全优先）**：
 
-- 所有仓库默认**不**同步；只有显式在 `.github-sync.yml` 中启用（`github.enabled: true`）的仓库才会同步；
+- 所有仓库默认**不受管理**（`github.state: disable`，等同 `remove`：不创建也不删除）；只有显式在 `.github-sync.yml` 中声明 `github.state: enable` 的仓库才会同步；
+- `github.state: suspend` 时删除该仓库的 Gitea Push Mirror（保留 GitHub 仓库，停止更新）；
 - 被创建到 GitHub 的云端仓库默认**私有**（`private: true`），需要公开时在 `.github-sync.yml` 中显式设置。
 
 ## 2. 整体架构
@@ -83,15 +84,15 @@ Gitea（本地主仓库）
 
 **初始化（幂等 ensure）**：`sync` 脚本对单个仓库执行：
 
-1. 读取该仓库的 `.github-sync.yml`（本地 `--config`，或通过 Gitea API 读取）；缺失或 `github.enabled != true` → 跳过（默认不同步）；
-2. 调用 GitHub API 检查云端仓库，不存在则创建（`private` 取配置，**默认私有**）；
-3. 调用 Gitea API 检查 Push Mirror，不存在则创建（`sync_on_commit=true`，间隔 `8h0m0s`）。
+1. 读取该仓库的 `.github-sync.yml`（本地 `--config` 仅单仓库模式生效，或通过 Gitea API 读取）；缺失或未写 `github.state` → 按 `disable`（等同 `remove`）处理，不创建/删除任何内容、不报错；`state` 非法 → 报错（退出码 1）；
+2. `github.state: enable` → 调用 GitHub API 检查云端仓库，不存在则创建（`private` 取配置，**默认私有**）；再调用 Gitea API 检查 Push Mirror，不存在则创建（`sync_on_commit=true`，间隔 `8h0m0s`）；
+3. `github.state: suspend` → 调用 Gitea API 删除指向本方案 GitHub 仓库的 Push Mirror（保留 GitHub 仓库，停止更新）。
 
 **触发方式**（可任选或并用）：
 - **cron 全量扫描**：`sync` 脚本不带 `--repo-name` 时遍历所有仓库，幂等补齐（新仓库最多延迟一个 cron 周期）；
 - **post-receive hook**：每个要同步的仓库配置一个 hook，push 后即时初始化该仓库。
 
-**声明式配置**：仓库行为完全由其配置决定（`.github-sync.yml` 的 `enabled` / `private`），无需改动脚本本身。
+**声明式配置**：仓库行为完全由其配置决定（`.github-sync.yml` 的 `state` / `private`），无需改动脚本本身。
 
 ## 4. 仓库结构
 
@@ -178,23 +179,32 @@ exec /path/to/gitea-push-github/sync/gitea_github_sync.py \
 - hook 需要按仓库配置（也可通过 Gitea API 批量注入 git hooks）；
 - 与 cron 方式可并存（hook 保证即时、cron 兜底）。
 
-> 提示：hook 只在仓库包含 `.github-sync.yml` 且 `enabled: true` 时才实际创建 GitHub 仓库；否则脚本立即以退出码 0 跳过，不影响 push。
+> 提示：hook 只在仓库包含 `.github-sync.yml` 且 `state: enable` 时才实际创建 GitHub 仓库（`state: suspend` 时删除 Push Mirror）；否则脚本立即以退出码 0 跳过，不影响 push。
 
 
-## 8. 启用 / 关闭同步（.github-sync.yml）
+## 8. 同步状态机（.github-sync.yml）
 
-在仓库根目录添加 `.github-sync.yml`（参考 `examples/github-sync.yml`）声明是否同步：
+在仓库根目录添加 `.github-sync.yml`（参考 `examples/github-sync.yml`），用 `github.state` 声明该仓库的同步状态：
 
 ```yaml
 # 仓库级 Gitea -> GitHub 同步配置
 github:
-  enabled: true    # true 才启用同步；默认 false
+  state: disable   # enable / suspend / remove / disable；默认 disable（等同 remove）
   private: true    # GitHub 云端仓库可见性（创建时生效）；默认 true（私有）
 ```
 
-**默认值**：
+**state 语义**：
 
-- 缺少本文件，或 `github.enabled` 非 `true` → **不**同步；
+| state | 行为 |
+| ---- | ---- |
+| `enable` | 创建/补齐：GitHub 无同名仓库则创建（默认私有）；Gitea Push Mirror 缺失则创建（保留已存在者） |
+| `suspend` | 停止更新：删除指向本方案 GitHub 仓库的 Gitea Push Mirror；GitHub 仓库保留不删 |
+| `remove` / `disable` | 不受管理：不创建也不删除 GitHub 仓库 / Push Mirror（二者等同） |
+
+**默认与报错规则**：
+
+- 缺少本文件、无 `github` 段或未写 `state` → 等同 `disable`：不创建/删除任何内容、**不报错**；
+- `state` 写成其他任何值（如 `foo` / `true`）→ **脚本报错，退出码 1**；
 - `github.private` 缺省为 `true`（私有）；需要公开时显式写 `private: false`。
 
 **启用步骤**：
@@ -202,15 +212,16 @@ github:
 ```bash
 # 在需要同步到 GitHub 的 Gitea 仓库根目录
 cp <本仓库>/examples/github-sync.yml .github-sync.yml
-# 编辑 .github-sync.yml，将 enabled 改为 true（并按需调整 private）
+# 编辑 .github-sync.yml，将 state 改为 enable（并按需调整 private）
 git add .github-sync.yml
-git commit -m "ci: enable github mirror sync"
+git commit -m "chore: set github sync state to enable"
 git push origin main
 ```
 
 push 后（cron 扫描或 hook 触发）：GitHub 上出现同名私有仓库，Gitea 仓库设置中出现指向 GitHub 的 Push Mirror；再 push 一次即可看到 GitHub 镜像更新。
 
-> 关闭同步：把 `.github-sync.yml` 中 `enabled` 改为 `false`（或删除文件）后 push 即可；已创建的 GitHub 仓库与已配置的 Push Mirror 不会被删除（脚本只做幂等补齐，不做破坏性操作）。
+> 停止更新（suspend）：把 `.github-sync.yml` 中 `state` 改为 `suspend` 后 push 即可；脚本会删除该仓库的 Gitea Push Mirror，但保留 GitHub 仓库（停止更新、不删除备份）。
+> 完全不受管理（remove/disable）：把 `state` 改为 `remove`（或 `disable`，或删除文件）；已有的 GitHub 仓库与 Push Mirror 均不会被删除或修改，脚本不报错。
 
 ## 9. 同步工具说明
 
@@ -226,15 +237,18 @@ push 后（cron 扫描或 hook 触发）：GitHub 上出现同名私有仓库，
 
 | 步骤 | 动作 | 幂等判定 |
 | ---- | ---- | -------- |
-| 1 | 读取 `.github-sync.yml` | 缺失或 `enabled != true` → 跳过（退出码 0） |
-| 2 | GitHub `GET /repos/{owner}/{repo}` | 200 已存在，跳过 |
-| 3 | GitHub `POST /user/repos` | 仅当第 2 步返回 404 时执行；`private` 取配置（默认 `true`） |
-| 4 | Gitea `GET /repos/{owner}/{repo}/push_mirrors` | 列表含目标地址即视为已存在 |
-| 5 | Gitea `POST /repos/{owner}/{repo}/push_mirrors` | 仅当第 4 步未命中时执行 |
+| 1 | 读取 `.github-sync.yml` | 缺失/无 `state` → 等同 `disable`（不创建不删除、不报错）；`state` 非法 → 报错（退出码 1） |
+| 2 | `state=enable`：GitHub `GET /repos/{owner}/{repo}` | 200 已存在，跳过 |
+| 3 | `state=enable`：GitHub `POST /user/repos` | 仅当第 2 步返回 404 时执行；`private` 取配置（默认 `true`） |
+| 4 | `state=enable`：Gitea `GET .../push_mirrors` | 列表含目标地址即视为已存在 |
+| 5 | `state=enable`：Gitea `POST .../push_mirrors` | 仅当第 4 步未命中时执行 |
+| 6 | `state=suspend`：Gitea `DELETE .../push_mirrors/{remote_name}` | 仅删除 `remote_address` 精确匹配的 Push Mirror；GitHub 仓库不动 |
 
 **Push Mirror 参数**：`remote_address = https://github.com/{github_username}/{repo}.git`，`remote_username` 为 GitHub 用户名，`remote_password` 为 GitHub Token，`sync_on_commit = true`，`interval = 8h0m0s`（定时兜底）。
 
-**退出码**：单仓库模式 `0` 成功（含未启用跳过）、`1` 失败；全量模式汇总所有仓库，存在失败时返回 `1`。
+**退出码**：单仓库模式 `0` 成功（含 `remove/disable` 跳过）、`1` 失败（含 `state` 非法）；全量模式汇总所有仓库，存在失败时返回 `1`。
+
+**`--dry-run`**：只打印将执行的动作（建库 / 建镜像 / 删镜像），不发起任何创建/删除；推荐正式执行前先预览。**全量模式忽略 `--config`**（逐仓库经 Gitea API 读取各自配置），防止一份配置误作用于全部仓库。
 
 ## 10. 与 CI 方案的对比
 
@@ -254,9 +268,12 @@ push 后（cron 扫描或 hook 触发）：GitHub 上出现同名私有仓库，
 
 | 场景 | 预期结果 |
 | ---- | -------- |
-| 新 Gitea 仓库（GitHub 无同名仓库，`.github-sync.yml` enabled） | GitHub 自动建库（默认私有），Push Mirror 自动创建 |
-| 仓库未添加 `.github-sync.yml` | 跳过，不产生任何 GitHub 调用 |
-| `.github-sync.yml` 中 `enabled: false` | 同上，跳过 |
+| 新 Gitea 仓库（GitHub 无同名仓库，`.github-sync.yml` `state: enable`） | GitHub 自动建库（默认私有），Push Mirror 自动创建 |
+| 仓库未添加 `.github-sync.yml` | 等同 `disable`：不产生任何 GitHub 调用，已有 Push Mirror 不动，不报错 |
+| `.github-sync.yml` 中 `state: remove` / `disable` | 同上，跳过 |
+| `state: suspend` | 删除匹配的 Gitea Push Mirror，保留 GitHub 仓库 |
+| `state` 为非法值（如 `foo` / `true`） | 报错，退出码 1 |
+| `--dry-run` | 只打印将执行动作，不实际创建/删除 |
 | GitHub 已有同名仓库 | 跳过创建，仅配置 Push Mirror |
 | 已存在 Push Mirror | 跳过，不产生重复 |
 | Mirror 被删除后再次扫描 / push | 检测缺失并自动重建 |
@@ -277,7 +294,7 @@ python3 -m unittest discover -s tests -v
 
 ```bash
 tmp=$(mktemp -d)
-printf 'github:\n  enabled: false\n' > "$tmp/.github-sync.yml"
+printf 'github:\n  state: remove\n' > "$tmp/.github-sync.yml"
 python3 sync/gitea_github_sync.py --repo-owner alice --repo-name repo \
   --config "$tmp/.github-sync.yml"
 echo "exit=$?"

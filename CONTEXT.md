@@ -551,5 +551,16 @@ Following a research review, the architecture was simplified further on branch `
 
 GitHub does not support creating repositories on push, so a small idempotent "ensure" step is unavoidable; however the continuous sync needs no CI at all. A cron scan or a post-receive hook (both official capabilities) is sufficient and simpler to operate than a CI system.
 
+## 16. State Machine Refinement (2026-08-20)
+
+- Per-repo config `github.enabled: true/false` replaced by `github.state` (default `disable`, equivalent to `remove`).
+- Valid states:
+  - `enable` — create GitHub repo if missing + ensure/keep Gitea Push Mirror;
+  - `suspend` — delete the Gitea Push Mirror pointing to the managed GitHub repo, keep the GitHub repo (stop updating);
+  - `remove` / `disable` — no-op: never create nor delete GitHub repo / Push Mirror.
+- Illegal `state` value → error, exit code 1. Missing config file → default `disable`, no error, existing push mirror untouched.
+- Push mirror deletion uses Gitea `DELETE /repos/{owner}/{repo}/push_mirrors/{name}` keyed by `remote_name`, matched only against the exact managed `remote_address`.
+- Safety: scan-all mode ignores local `--config` (each repo config read via Gitea API) to prevent one config from affecting all repos; added `--dry-run` to preview changes before any mutation.
+
 # End of Context
 

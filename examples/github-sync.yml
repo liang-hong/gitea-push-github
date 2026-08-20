@@ -2,10 +2,13 @@
 #
 # 用法：复制本文件为目标仓库根目录的 .github-sync.yml，并按需修改。
 #
-# 默认行为（安全优先）：
-#   - 仓库缺少本文件，或 github.enabled != true 时，【不同步】到 GitHub；
-#   - 启用同步后，GitHub 云端仓库默认【私有】；
-#     如需公开，显式设置 github.private: false。
+# github.state 合法值：
+#   enable   - 创建/补齐：GitHub 无同名仓库则创建（默认私有）；Gitea Push Mirror 缺失则创建（保留已存在者）
+#   suspend  - 停止更新：删除指向本方案 GitHub 仓库的 Gitea Push Mirror；GitHub 仓库保留不删
+#   remove   - 不受本方案管理（等同 disable）：不创建也不删除 GitHub 仓库 / Push Mirror
+#   disable  - 同 remove（默认值；文件缺失或未写 state 时等同此值）
+#
+# 注意：state 写成其他任何值（如 foo / true）都会导致脚本报错（退出码 1）。
 github:
-  enabled: false   # true 才启用同步；默认 false
+  state: disable   # enable / suspend / remove / disable；默认 disable（等同 remove）
   private: true    # GitHub 云端仓库可见性（创建时生效）；默认 true
