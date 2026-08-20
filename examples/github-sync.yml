@@ -15,3 +15,4 @@
 github:
   state: disable   # enable / suspend / remove / disable；默认 disable（等同 remove）
   private: true    # GitHub 云端仓库可见性（创建时生效，之后每次收敛也生效）；默认 true
+  default_branch: no-ci  # 可选；GitHub 云端仓库默认分支（未配置则不改动）

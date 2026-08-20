@@ -144,6 +144,7 @@ GITEA_TOKEN=xxxx
 github:
   state: disable   # enable / suspend / remove / disable；默认 disable（等同 remove）
   private: true    # GitHub 云端仓库可见性（创建时生效，之后每次收敛也生效）；默认 true
+  default_branch: no-ci  # 可选；GitHub 云端仓库默认分支（未配置则不改动）
 ```
 
 `state` 语义：
@@ -159,7 +160,8 @@ github:
 - 缺少本文件、无 `github` 段或未写 `state` → 等同 `disable`：不创建/删除任何内容、**不报错**；
 - `state` 为其他任何值（如 `foo` / `true`）→ **脚本报错，退出码 1**；
 - **多分支仓库**：仅当**全部分支**都有 `.github-sync.yml` 且内容一致（忽略注释）时才执行策略；任一分支缺失或不一致 → 按 `disable` 处理（不报错）；
-- 可见性：公开仓库 + 配置 `private: true` → 自动改回私有；私有仓库改公开需显式 `private: false`，脚本会打印警告。
+- 可见性：公开仓库 + 配置 `private: true` → 自动改回私有；私有仓库改公开需显式 `private: false`，脚本会打印警告；
+- `default_branch`（可选）：设置 GitHub 云端仓库默认分支；仅 `state=enable` 时生效，且需该分支已同步到 GitHub（否则本次跳过并警告，镜像同步后下次运行生效）。
 
 ### 5.3 申请 Token（GitHub / Gitea）
 
@@ -249,7 +251,7 @@ git push origin main
 | 1 | 读取各分支 `.github-sync.yml` | 缺失/不一致 → 等同 `disable`（不报错）；`state` 非法 → 报错（退出码 1） |
 | 2 | GitHub `GET /repos/{owner}/{repo}` | 200 已存在：`private` 与配置不一致 → PATCH 收敛；404 进入创建 |
 | 3 | GitHub `POST /user/repos` | 仅当第 2 步返回 404 时执行；`private` 取配置（默认 `true`） |
-| 4 | GitHub `PATCH /repos/{owner}/{repo}` | 仅当第 2 步 200 且可见性与配置不一致时执行 |
+| 4 | GitHub `PATCH /repos/{owner}/{repo}` | 仅当第 2 步 200 且可见性或默认分支与配置不一致时执行 |
 | 5 | Gitea `GET .../push_mirrors` | 列表含目标地址即视为已存在 |
 | 6 | Gitea `POST .../push_mirrors` | 仅当第 5 步未命中时执行 |
 
@@ -282,6 +284,8 @@ git push origin main
 | 多分支：全部分支一致（仅注释不同） | 正常执行策略 |
 | `state` 为非法值（如 `foo` / `true`） | 报错，退出码 1 |
 | 已存在仓库可见性与配置不一致（`enable`） | PATCH 收敛可见性；公开改私有自动，私有改公开需显式 `private: false` 并打印警告 |
+| 配置 `default_branch`（分支已同步） | PATCH 设置 GitHub 默认分支 |
+| 配置 `default_branch`（分支尚未同步） | 本次跳过并警告，镜像同步后下次运行生效 |
 | `--dry-run` | 只打印将执行动作，不实际创建/删除/修改 |
 
 ## 9. 本地测试

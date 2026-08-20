@@ -569,5 +569,11 @@ GitHub does not support creating repositories on push, so a small idempotent "en
 - Multi-branch rule: the push policy executes only when **every branch** has `.github-sync.yml` and their contents are identical (comments ignored); any branch missing or differing → treated as `disable` (no error).
 - README consolidated: all deployment and modification steps merged into one chapter “部署与使用”.
 
+## 18. Default Branch Config (2026-08-20)
+
+- New optional `github.default_branch` config: in `enable` state the script reconciles the GitHub repo's default branch via `PATCH /repos/{owner}/{repo}`, combined into the same PATCH as visibility.
+- The target branch must already exist on GitHub (mirror synced) before it can be set; otherwise skipped with a warning and retried on next run.
+- Current repo `gitea-push-github` config sets `default_branch: no-ci` on both branches.
+
 # End of Context
 
