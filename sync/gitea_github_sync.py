@@ -30,7 +30,7 @@
                      # suspend=删除 Gitea Push Mirror（保留 GitHub 仓库，停止更新）
                      # remove/disable=不创建不删除（默认，二者等同）
     private: true    # GitHub 云端仓库可见性；默认 true（私有）
-    default_branch: no-ci  # 可选；设置 GitHub 云端仓库默认分支（未配置则不改动）
+    default_branch: no-ci  # 可选；同时设置 Gitea 与 GitHub 云端仓库默认分支（未配置则不改动）
 
 多分支：仅当全部分支都有 .github-sync.yml 且内容一致（忽略注释）时才执行策略；
 任一分支缺失或不一致 → 按 disable 处理（不报错）。
@@ -77,6 +77,9 @@ PAGE_SIZE = 50
 # github.state 合法值；disable 等同 remove（缺省），详见 config_state()
 LEGAL_STATES = ("enable", "suspend", "remove", "disable")
 DEFAULT_STATE = "remove"
+
+# git 常见默认主分支名；分支参数为空时回退（优先 main，其次 master）
+DEFAULT_BRANCH_CANDIDATES = ("main", "master")
 
 
 def get_env(name, default=None):
@@ -231,7 +234,7 @@ def config_private(config):
 
 
 def config_default_branch(config):
-    """读取 github.default_branch；未配置时返回 None（不改动 GitHub 默认分支）。"""
+    """读取 github.default_branch；未配置时返回 None（不改动默认分支）。"""
     if not isinstance(config, dict):
         return None
     section = config.get("github")
@@ -241,6 +244,20 @@ def config_default_branch(config):
     if value is None:
         return None
     return str(value).strip() or None
+
+
+def branch_or_default(branch, exists=None):
+    """分支参数为空时回退到 git 常见默认主分支名（优先 main，其次 master）。
+
+    exists 为可调用对象（入参为分支名）时，会尝试探测存在的主分支；未提供 exists
+    或候选都不存在时返回 "main"。
+    """
+    if branch:
+        return branch
+    for candidate in DEFAULT_BRANCH_CANDIDATES:
+        if exists is None or exists(candidate):
+            return candidate
+    return DEFAULT_BRANCH_CANDIDATES[0]
 
 
 # ---- HTTP 与 API ----
@@ -289,6 +306,7 @@ def github_get_repo(owner, repo, token):
 
 def github_branch_exists(owner, repo, branch, token):
     """检查 GitHub 仓库某分支是否存在（PATCH 默认分支前先确认）。"""
+    branch = branch_or_default(branch)  # 空值回退 main
     url = f"{GITHUB_API}/repos/{owner}/{repo}/branches/{quote(str(branch), safe='')}"
     code, _ = http_request("GET", url, github_headers(token))
     return code == 200
@@ -388,6 +406,7 @@ def load_repo_config_via_api(gitea_api_url, owner, repo, token):
 
 def gitea_get_file(api_url, owner, repo, path, ref, token):
     """读取仓库内文件文本；不存在或读取失败返回 None。"""
+    ref = branch_or_default(ref)  # 分支参数为空时回退 main（git 默认主分支）
     url = (
         f"{api_url}/{GITEA_API_PREFIX}/repos/{quote(owner)}/{quote(repo)}"
         f"/contents/{quote(path)}?ref={quote(ref)}"
@@ -403,6 +422,29 @@ def gitea_get_file(api_url, owner, repo, path, ref, token):
         return base64.b64decode(content).decode("utf-8")
     except Exception:
         return None
+
+
+def gitea_get_repo(api_url, owner, repo, token):
+    """获取 Gitea 仓库信息（含 default_branch 字段）。"""
+    url = f"{api_url}/{GITEA_API_PREFIX}/repos/{quote(owner)}/{quote(repo)}"
+    return http_request("GET", url, gitea_headers(token))
+
+
+def gitea_branch_exists(api_url, owner, repo, branch, token):
+    """检查 Gitea 仓库某分支是否存在。"""
+    branch = branch_or_default(branch)  # 空值回退 main
+    url = (
+        f"{api_url}/{GITEA_API_PREFIX}/repos/{quote(owner)}/{quote(repo)}"
+        f"/branches/{quote(str(branch), safe='')}"
+    )
+    code, _ = http_request("GET", url, gitea_headers(token))
+    return code == 200
+
+
+def gitea_update_repo_default_branch(api_url, owner, repo, branch, token):
+    """PATCH 修改 Gitea 仓库默认分支。"""
+    url = f"{api_url}/{GITEA_API_PREFIX}/repos/{quote(owner)}/{quote(repo)}"
+    return http_request("PATCH", url, gitea_headers(token), {"default_branch": branch})
 
 
 def gitea_list_push_mirrors(api_url, owner, repo, token):
@@ -476,7 +518,7 @@ def ensure_repo(owner, repo, creds, dry_run=False):
     一致（忽略注释）时执行策略，否则按 disable 处理（不报错）。
 
     state:
-      enable  - GitHub 仓库缺失则创建、已存在则按配置收敛可见性与默认分支；Push Mirror 缺失则创建（保留已存在者）
+      enable  - GitHub 仓库缺失则创建、已存在则按配置收敛可见性与默认分支；Gitea 默认分支也按配置收敛；Push Mirror 缺失则创建（保留已存在者）
       suspend - 删除指向本方案 GitHub 的 Push Mirror（保留 GitHub 仓库，停止更新）
       remove/disable（缺省） - 不创建也不删除任何内容（无操作）
     非法 state 值报错并返回 False。dry_run=True 时只打印将执行的动作，不发起写操作。
@@ -547,12 +589,16 @@ def ensure_repo(owner, repo, creds, dry_run=False):
             if not private:
                 log(f"警告: GitHub 仓库 {github_username}/{repo} 将由私有改为公开（private=false）")
             updates["private"] = private
-        current_default = repo_payload.get("default_branch")
-        if default_branch and default_branch != current_default:
-            if github_branch_exists(github_username, repo, default_branch, github_token):
-                updates["default_branch"] = default_branch
-            else:
-                log(f"警告: 分支 {default_branch} 尚未同步到 GitHub 仓库，暂不设置默认分支（镜像同步后下次运行生效）")
+        if default_branch:
+            current_default = branch_or_default(
+                repo_payload.get("default_branch"),
+                lambda branch: github_branch_exists(github_username, repo, branch, github_token),
+            )
+            if default_branch != current_default:
+                if github_branch_exists(github_username, repo, default_branch, github_token):
+                    updates["default_branch"] = default_branch
+                else:
+                    log(f"警告: 分支 {default_branch} 尚未同步到 GitHub 仓库，暂不设置默认分支（镜像同步后下次运行生效）")
         if updates:
             if dry_run:
                 log(f"dry-run: 将 PATCH 更新 GitHub 仓库 {github_username}/{repo} {updates}")
@@ -566,6 +612,33 @@ def ensure_repo(owner, repo, creds, dry_run=False):
                     return False
         else:
             log(f"GitHub 仓库 {github_username}/{repo} 可见性与默认分支均与配置一致，跳过")
+
+    # ---- 步骤 1c: 收敛 Gitea 默认分支（配置了 default_branch 时） ----
+    if default_branch:
+        code, payload = gitea_get_repo(gitea_api_url, owner, repo, gitea_token)
+        if code != 200 or not isinstance(payload, dict):
+            reason = payload.get("message", payload) if isinstance(payload, dict) else payload
+            log(f"Gitea 仓库信息获取失败 (HTTP {code}): {reason}")
+            return False
+        current_gitea_default = branch_or_default(
+            payload.get("default_branch"),
+            lambda branch: gitea_branch_exists(gitea_api_url, owner, repo, branch, gitea_token),
+        )
+        if current_gitea_default != default_branch:
+            if dry_run:
+                log(f"dry-run: 将 PATCH Gitea 仓库默认分支 {owner}/{repo} -> {default_branch}")
+            else:
+                code2, payload2 = gitea_update_repo_default_branch(
+                    gitea_api_url, owner, repo, default_branch, gitea_token
+                )
+                if code2 in (200, 204):
+                    log(f"Gitea 仓库默认分支已更新: {owner}/{repo} -> {default_branch}")
+                else:
+                    reason = payload2.get("message", payload2) if isinstance(payload2, dict) else payload2
+                    log(f"Gitea 仓库默认分支更新失败 (HTTP {code2}): {reason}")
+                    return False
+        else:
+            log(f"Gitea 仓库 {owner}/{repo} 默认分支已是 {default_branch}")
 
     # ---- 步骤 2: Gitea Push Mirror 检查 / 创建 ----
     code, payload = gitea_list_push_mirrors(gitea_api_url, owner, repo, gitea_token)
