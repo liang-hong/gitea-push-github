@@ -3,11 +3,12 @@
 """Gitea -> GitHub 自动镜像供给脚本（幂等，无需 CI）。
 
 职责：
-  1. 读取仓库级配置 .github-sync.yml，按 github.state 收敛到目标状态：
+  1. 读取仓库主目录 .github-sync.yml（固定位置/文件名），按 github.state 收敛到目标状态：
      enable   - GitHub 无同名仓库则创建（private 默认 true）；Push Mirror 缺失则创建（保留已存在者）
      suspend  - 删除指向本方案 GitHub 仓库的 Gitea Push Mirror；GitHub 仓库保留不删
      remove/disable（缺省） - 不创建也不删除任何内容
-     state 值非法时报错；配置文件缺失时按 disable 处理（不修改已有 Push Mirror、不报错）。
+     多分支规则：仅当全部分支都有该文件且内容一致（忽略注释）时才执行策略；
+     任一分支缺失或不一致 → 按 disable 处理（不报错）。state 值非法时报错。
   2. state=enable 时检查 GitHub 仓库是否存在：不存在则以 private=true（默认）创建；
      已存在则按配置收敛可见性（PATCH）。
   3. state=enable 时检查 Gitea Push Mirror 是否存在，不存在则创建。
@@ -23,12 +24,15 @@
 
   --dry-run 只打印将执行的动作，不发起任何创建/删除（推荐先预览再执行）。
 
-仓库级配置 .github-sync.yml（缺省 state=disable 即不同步，见 examples/github-sync.yml）：
+仓库级配置：固定为仓库主目录 .github-sync.yml（不使用其他位置/文件名，见 examples/github-sync.yml）：
   github:
     state: enable    # enable=创建 GitHub 仓库并保留/补齐 Push Mirror
                      # suspend=删除 Gitea Push Mirror（保留 GitHub 仓库，停止更新）
                      # remove/disable=不创建不删除（默认，二者等同）
     private: true    # GitHub 云端仓库可见性；默认 true（私有）
+
+多分支：仅当全部分支都有 .github-sync.yml 且内容一致（忽略注释）时才执行策略；
+任一分支缺失或不一致 → 按 disable 处理（不报错）。
 
 凭据来源（优先级从高到低，详见 README）：
   1. --credentials 指定的本地文件
@@ -192,14 +196,6 @@ def parse_repo_config_text(text):
     return _parse_yaml_min(text)
 
 
-def load_repo_config(path):
-    """读取本地同步配置文件；文件不存在时返回 None（即默认不同步）。"""
-    if not os.path.isfile(path):
-        return None
-    with open(path, "r", encoding="utf-8") as handle:
-        return parse_repo_config_text(handle.read())
-
-
 def config_state(config):
     """读取 github.state 并归一化。返回 "enable" / "suspend" / "remove"。
 
@@ -318,6 +314,58 @@ def gitea_list_repos(api_url, owner, token):
     return repos
 
 
+def gitea_list_branches(api_url, owner, repo, token):
+    """分页获取仓库全部分支名；失败返回 None。"""
+    names = []
+    page = 1
+    while True:
+        url = (
+            f"{api_url}/{GITEA_API_PREFIX}/repos/{quote(owner)}/{quote(repo)}/branches"
+            f"?page={page}&limit={PAGE_SIZE}"
+        )
+        code, payload = http_request("GET", url, gitea_headers(token))
+        if code != 200:
+            reason = payload.get("message", payload) if isinstance(payload, dict) else payload
+            log(f"分支列表获取失败 (HTTP {code}): {reason}")
+            return None
+        if not isinstance(payload, list) or not payload:
+            break
+        names.extend(
+            item.get("name") for item in payload
+            if isinstance(item, dict) and item.get("name")
+        )
+        if len(payload) < PAGE_SIZE:
+            break
+        page += 1
+    return names
+
+
+def load_repo_config_via_api(gitea_api_url, owner, repo, token):
+    """按规则读取仓库统一配置（固定仓库主目录 .github-sync.yml）。
+
+    多分支规则：仅当全部分支都有 .github-sync.yml 且内容一致（忽略注释，按解析结果
+    比较）时返回解析后的配置；任一分支缺失或不一致 → 返回 None（按 disable 处理，
+    不报错）。分支列表获取失败同样按 disable 处理（安全方向）。
+    """
+    branches = gitea_list_branches(gitea_api_url, owner, repo, token)
+    if not branches:
+        return None
+    texts = []
+    for branch in branches:
+        text = gitea_get_file(gitea_api_url, owner, repo, REPO_CONFIG, branch, token)
+        if text is None:
+            log(f"{owner}/{repo}: 分支 {branch} 缺少 {REPO_CONFIG}，按 disable 处理")
+            return None
+        texts.append(text)
+    parsed = [parse_repo_config_text(text) for text in texts]
+    first = parsed[0]
+    for index, item in enumerate(parsed[1:], start=1):
+        if item != first:
+            log(f"{owner}/{repo}: 分支间 {REPO_CONFIG} 内容不一致（忽略注释），按 disable 处理")
+            return None
+    return first
+
+
 def gitea_get_file(api_url, owner, repo, path, ref, token):
     """读取仓库内文件文本；不存在或读取失败返回 None。"""
     url = (
@@ -401,8 +449,11 @@ def suspend_push_mirror(api_url, owner, repo, token, remote_address, dry_run=Fal
     return ok
 
 
-def ensure_repo(owner, repo, creds, config_arg=None, dry_run=False):
-    """按 .github-sync.yml 的 github.state 幂等收敛到目标状态。返回是否成功。
+def ensure_repo(owner, repo, creds, dry_run=False):
+    """按仓库主目录 .github-sync.yml 的 github.state 幂等收敛到目标状态。返回是否成功。
+
+    配置固定为仓库主目录 .github-sync.yml；多分支仓库仅当全部分支都有该文件且内容
+    一致（忽略注释）时执行策略，否则按 disable 处理（不报错）。
 
     state:
       enable  - GitHub 仓库缺失则创建、已存在则按配置收敛可见性；Push Mirror 缺失则创建（保留已存在者）
@@ -415,12 +466,8 @@ def ensure_repo(owner, repo, creds, config_arg=None, dry_run=False):
     gitea_api_url = (creds.get("GITEA_API_URL") or "").rstrip("/")
     gitea_token = creds.get("GITEA_TOKEN")
 
-    # 读取仓库级配置：本地 --config 优先（仅单仓库模式），否则通过 Gitea API 读取 .github-sync.yml
-    if config_arg:
-        config = load_repo_config(config_arg)
-    else:
-        text = gitea_get_file(gitea_api_url, owner, repo, REPO_CONFIG, "HEAD", gitea_token)
-        config = parse_repo_config_text(text) if text else None
+    # 读取仓库级配置：固定经 Gitea API 读取仓库主目录 .github-sync.yml（多分支一致性校验）
+    config = load_repo_config_via_api(gitea_api_url, owner, repo, gitea_token)
 
     try:
         state = config_state(config)
@@ -524,10 +571,6 @@ def main(argv=None):
     )
     parser.add_argument("--credentials", help="本地凭据文件路径")
     parser.add_argument(
-        "--config",
-        help="本地同步配置文件（仅单仓库模式生效）；缺省通过 Gitea API 读取仓库内 .github-sync.yml",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="只打印将执行的动作，不发起任何创建/删除",
@@ -553,11 +596,9 @@ def main(argv=None):
 
     # ---- 单仓库模式（post-receive hook 等按需触发） ----
     if args.repo_name:
-        return 0 if ensure_repo(repo_owner, args.repo_name, creds, args.config, args.dry_run) else 1
+        return 0 if ensure_repo(repo_owner, args.repo_name, creds, args.dry_run) else 1
 
     # ---- 全量模式（cron / 手动），遍历所有者全部仓库 ----
-    if args.config:
-        log("全量模式忽略 --config，逐仓库通过 Gitea API 读取 .github-sync.yml")
     gitea_api_url = (creds.get("GITEA_API_URL") or "").rstrip("/")
     repos = gitea_list_repos(gitea_api_url, repo_owner, creds.get("GITEA_TOKEN"))
     log(f"共发现 {len(repos)} 个仓库（{repo_owner}）")
@@ -577,7 +618,7 @@ def main(argv=None):
             log(f"{repo_owner}/{name}: 空仓库（无默认分支），跳过")
             skipped.append(name)
             continue
-        if ensure_repo(repo_owner, name, creds, None, args.dry_run):
+        if ensure_repo(repo_owner, name, creds, args.dry_run):
             updated.append(name)
         else:
             errors.append(name)
