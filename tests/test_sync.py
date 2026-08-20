@@ -85,35 +85,47 @@ class CredentialsTest(unittest.TestCase):
 
 
 class ConfigTest(unittest.TestCase):
-    def test_missing_config_is_disabled(self):
+    def test_missing_config_is_default_remove(self):
         self.assertIsNone(sync.load_repo_config("/nonexistent/.github-sync.yml"))
-        self.assertFalse(sync.config_enabled(None))
+        self.assertEqual(sync.config_state(None), "remove")
 
     def test_min_parser(self):
         text = """# 注释
 github:
-  enabled: true
+  state: enable
   private: false
 """
         cfg = sync.parse_repo_config_text(text)
-        self.assertTrue(cfg["github"]["enabled"])
+        self.assertEqual(sync.config_state(cfg), "enable")
         self.assertFalse(cfg["github"]["private"])
 
     def test_min_parser_inline_comment(self):
-        text = "github:\n  enabled: true  # 启用\n  private: true\n"
+        text = "github:\n  state: suspend  # 暂停\n  private: true\n"
         cfg = sync.parse_repo_config_text(text)
-        self.assertTrue(cfg["github"]["enabled"])
+        self.assertEqual(sync.config_state(cfg), "suspend")
 
     def test_defaults_private_true(self):
-        text = "github:\n  enabled: true\n"
+        text = "github:\n  state: enable\n"
         cfg = sync.parse_repo_config_text(text)
-        self.assertTrue(sync.config_enabled(cfg))
+        self.assertEqual(sync.config_state(cfg), "enable")
         self.assertTrue(sync.config_private(cfg))  # 默认私有
 
-    def test_disabled_by_default(self):
-        text = "github:\n  enabled: false\n"
-        cfg = sync.parse_repo_config_text(text)
-        self.assertFalse(sync.config_enabled(cfg))
+    def test_state_defaults_remove(self):
+        cfg = sync.parse_repo_config_text("github:\n  private: true\n")
+        self.assertEqual(sync.config_state(cfg), "remove")
+
+    def test_state_disable_equals_remove(self):
+        cfg = sync.parse_repo_config_text("github:\n  state: disable\n")
+        self.assertEqual(sync.config_state(cfg), "remove")
+
+    def test_state_case_insensitive(self):
+        cfg = sync.parse_repo_config_text("github:\n  state: ENABLE\n")
+        self.assertEqual(sync.config_state(cfg), "enable")
+
+    def test_illegal_state_raises(self):
+        cfg = sync.parse_repo_config_text("github:\n  state: foo\n")
+        with self.assertRaises(ValueError):
+            sync.config_state(cfg)
 
 
 class SyncMainTest(unittest.TestCase):
@@ -143,14 +155,15 @@ class SyncMainTest(unittest.TestCase):
     def base_args(self):
         return ["--repo-owner", "alice", "--credentials", self.creds]
 
-    def test_single_repo_disabled_local_config(self):
-        config = self.write_config("github:\n  enabled: false\n")
-        with fake_urlopen(side_effect=AssertionError("不应发起 API 调用")):
-            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
-        self.assertEqual(rc, 0)
+    def test_single_repo_remove_disable_noop(self):
+        for state in ("remove", "disable"):
+            config = self.write_config(f"github:\n  state: {state}\n")
+            with fake_urlopen(side_effect=AssertionError("不应发起 API 调用")):
+                rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
+            self.assertEqual(rc, 0)
 
     def test_single_repo_enabled_local_config_creates_private(self):
-        config = self.write_config("github:\n  enabled: true\n")
+        config = self.write_config("github:\n  state: enable\n")
         calls = []
 
         def handler(request, **kwargs):
@@ -176,7 +189,7 @@ class SyncMainTest(unittest.TestCase):
         self.assertEqual(sum(1 for c in calls if c.method == "POST"), 2)
 
     def test_single_repo_existing_skipped(self):
-        config = self.write_config("github:\n  enabled: true\n")
+        config = self.write_config("github:\n  state: enable\n")
 
         def handler(request, **kwargs):
             url = request.full_url
@@ -190,6 +203,99 @@ class SyncMainTest(unittest.TestCase):
             rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
         self.assertEqual(rc, 0)
 
+    def test_single_repo_suspend_deletes_matching_mirror(self):
+        config = self.write_config("github:\n  state: suspend\n")
+        calls = []
+
+        def handler(request, **kwargs):
+            calls.append(request)
+            url = request.full_url
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [{
+                    "remote_address": "https://github.com/octocat/repo.git",
+                    "remote_name": "push_mirror_1",
+                }])
+            if request.method == "DELETE" and url.endswith("/push_mirrors/push_mirror_1"):
+                return make_response(204, None)
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(1 for c in calls if c.method == "DELETE"), 1)
+
+    def test_single_repo_suspend_no_mirror_ok(self):
+        config = self.write_config("github:\n  state: suspend\n")
+        calls = []
+
+        def handler(request, **kwargs):
+            calls.append(request)
+            url = request.full_url
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(1 for c in calls if c.method == "DELETE"), 0)
+
+    def test_single_repo_suspend_nonmatching_mirror_untouched(self):
+        config = self.write_config("github:\n  state: suspend\n")
+
+        def handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [{
+                    "remote_address": "https://gitlab.com/other/repo.git",
+                    "remote_name": "other_mirror",
+                }])
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
+        self.assertEqual(rc, 0)
+
+    def test_single_repo_illegal_state_fails(self):
+        config = self.write_config("github:\n  state: foo\n")
+        with fake_urlopen(side_effect=AssertionError("不应发起 API 调用")):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
+        self.assertEqual(rc, 1)
+
+    def test_single_repo_enable_dry_run_no_mutation(self):
+        config = self.write_config("github:\n  state: enable\n")
+
+        def handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and "/repos/octocat/repo" in url and "api.github.com" in url:
+                raise make_http_error(404, {"message": "Not Found"})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(
+                self.base_args() + ["--repo-name", "repo", "--config", config, "--dry-run"]
+            )
+        self.assertEqual(rc, 0)
+
+    def test_single_repo_suspend_dry_run_no_delete(self):
+        config = self.write_config("github:\n  state: suspend\n")
+
+        def handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [{
+                    "remote_address": "https://github.com/octocat/repo.git",
+                    "remote_name": "push_mirror_1",
+                }])
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(
+                self.base_args() + ["--repo-name", "repo", "--config", config, "--dry-run"]
+            )
+        self.assertEqual(rc, 0)
 
     def test_single_repo_config_via_api_disabled(self):
         # 无 --config：通过 Gitea API 读取 .github-sync.yml，404 = 未启用
@@ -207,7 +313,7 @@ class SyncMainTest(unittest.TestCase):
         def handler(request, **kwargs):
             url = request.full_url
             if request.method == "GET" and "/contents/.github-sync.yml" in url:
-                return make_response(200, {"content": encode_file("github:\n  enabled: true\n")})
+                return make_response(200, {"content": encode_file("github:\n  state: enable\n")})
             if request.method == "GET" and "/repos/octocat/repo" in url and "api.github.com" in url:
                 raise make_http_error(404, {"message": "Not Found"})
             if request.method == "POST" and url == "https://api.github.com/user/repos":
@@ -257,7 +363,7 @@ class SyncMainTest(unittest.TestCase):
                 return make_response(200, repos)
             if request.method == "GET" and "/contents/.github-sync.yml" in url:
                 if "enabled-repo" in url:
-                    return make_response(200, {"content": encode_file("github:\n  enabled: true\n")})
+                    return make_response(200, {"content": encode_file("github:\n  state: enable\n")})
                 raise make_http_error(404, {"message": "Not Found"})
             if request.method == "GET" and "/repos/octocat/enabled-repo" in url and "api.github.com" in url:
                 raise make_http_error(404, {"message": "Not Found"})
@@ -273,13 +379,42 @@ class SyncMainTest(unittest.TestCase):
             rc = sync.main(self.base_args())
         self.assertEqual(rc, 0)
 
+    def test_scan_all_ignores_local_config(self):
+        # 全量模式必须逐仓库经 Gitea API 读配置；传 --config 不能覆盖全部仓库
+        repos = [{"name": "repo-a", "empty": False, "archived": False, "mirror": False}]
+        local = self.write_config("github:\n  state: remove\n")  # 若被应用则全部无操作
+        created = []
+
+        def handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and "/users/alice/repos" in url:
+                return make_response(200, repos)
+            if request.method == "GET" and "/contents/.github-sync.yml" in url:
+                return make_response(200, {"content": encode_file("github:\n  state: enable\n")})
+            if request.method == "GET" and "/repos/octocat/repo-a" in url and "api.github.com" in url:
+                raise make_http_error(404, {"message": "Not Found"})
+            if request.method == "POST" and url == "https://api.github.com/user/repos":
+                created.append(url)
+                return make_response(201, {"name": "repo-a"})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            if request.method == "POST" and "push_mirrors" in url:
+                return make_response(201, {})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--config", local])
+        self.assertEqual(rc, 0)
+        # --config 被忽略：repo-a 经 API 读到 state=enable，应发起建库 POST
+        self.assertEqual(len(created), 1)
+
     def test_missing_owner_fails(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(SystemExit):
                 sync.main(["--credentials", self.creds])
 
     def test_missing_credentials_fails(self):
-        config = self.write_config("github:\n  enabled: true\n")
+        config = self.write_config("github:\n  state: enable\n")
         missing_creds = os.path.join(self.tmp, "missing.env")
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(SystemExit):
