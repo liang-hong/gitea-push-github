@@ -145,6 +145,14 @@ class ConfigTest(unittest.TestCase):
         cfg = sync.parse_repo_config_text("github:\n  state: ENABLE\n")
         self.assertEqual(sync.config_state(cfg), "enable")
 
+    def test_default_branch_none_by_default(self):
+        cfg = sync.parse_repo_config_text("github:\n  state: enable\n")
+        self.assertIsNone(sync.config_default_branch(cfg))
+
+    def test_default_branch(self):
+        cfg = sync.parse_repo_config_text("github:\n  state: enable\n  default_branch: no-ci\n")
+        self.assertEqual(sync.config_default_branch(cfg), "no-ci")
+
     def test_illegal_state_raises(self):
         cfg = sync.parse_repo_config_text("github:\n  state: foo\n")
         with self.assertRaises(ValueError):
@@ -357,6 +365,99 @@ class SyncMainTest(unittest.TestCase):
             base_handler,
             repo_texts={"repo": {"main": "github:\n  state: enable\n  private: false\n"}},
         )
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--dry-run"])
+        self.assertEqual(rc, 0)
+
+    def test_single_repo_enable_sets_default_branch(self):
+        config_text = "github:\n  state: enable\n  default_branch: no-ci\n"
+        calls = []
+
+        def base_handler(request, **kwargs):
+            calls.append(request)
+            url = request.full_url
+            if request.method == "GET" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
+                return make_response(200, {"private": True, "default_branch": "main"})
+            if request.method == "GET" and "/branches/no-ci" in url and "api.github.com" in url:
+                return make_response(200, {"name": "no-ci"})
+            if request.method == "PATCH" and url.endswith("/repos/octocat/repo"):
+                self.assertEqual(json.loads(request.data), {"default_branch": "no-ci"})
+                return make_response(200, {"private": True, "default_branch": "no-ci"})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            if request.method == "POST" and "push_mirrors" in url:
+                return make_response(201, {})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        handler = with_api_config(base_handler, repo_texts={"repo": {"main": config_text}})
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(1 for c in calls if c.method == "PATCH"), 1)
+
+    def test_single_repo_enable_default_branch_missing_skips(self):
+        config_text = "github:\n  state: enable\n  default_branch: no-ci\n"
+        calls = []
+
+        def base_handler(request, **kwargs):
+            calls.append(request)
+            url = request.full_url
+            if request.method == "GET" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
+                return make_response(200, {"private": True, "default_branch": "main"})
+            if request.method == "GET" and "/branches/no-ci" in url and "api.github.com" in url:
+                raise make_http_error(404, {"message": "Not Found"})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            if request.method == "POST" and "push_mirrors" in url:
+                return make_response(201, {})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        handler = with_api_config(base_handler, repo_texts={"repo": {"main": config_text}})
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(1 for c in calls if c.method == "PATCH"), 0)
+
+    def test_single_repo_enable_default_branch_combined_with_private(self):
+        config_text = "github:\n  state: enable\n  private: true\n  default_branch: no-ci\n"
+        calls = []
+
+        def base_handler(request, **kwargs):
+            calls.append(request)
+            url = request.full_url
+            if request.method == "GET" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
+                return make_response(200, {"private": False, "default_branch": "main"})
+            if request.method == "GET" and "/branches/no-ci" in url and "api.github.com" in url:
+                return make_response(200, {"name": "no-ci"})
+            if request.method == "PATCH" and url.endswith("/repos/octocat/repo"):
+                self.assertEqual(json.loads(request.data), {"private": True, "default_branch": "no-ci"})
+                return make_response(200, {"private": True, "default_branch": "no-ci"})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            if request.method == "POST" and "push_mirrors" in url:
+                return make_response(201, {})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        handler = with_api_config(base_handler, repo_texts={"repo": {"main": config_text}})
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(1 for c in calls if c.method == "PATCH"), 1)
+
+    def test_single_repo_default_branch_dry_run_no_patch(self):
+        config_text = "github:\n  state: enable\n  default_branch: no-ci\n"
+
+        def base_handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
+                return make_response(200, {"private": True, "default_branch": "main"})
+            if request.method == "GET" and "/branches/no-ci" in url and "api.github.com" in url:
+                return make_response(200, {"name": "no-ci"})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        handler = with_api_config(base_handler, repo_texts={"repo": {"main": config_text}})
         with fake_urlopen(side_effect=handler):
             rc = sync.main(self.base_args() + ["--repo-name", "repo", "--dry-run"])
         self.assertEqual(rc, 0)
