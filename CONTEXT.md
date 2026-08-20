@@ -571,8 +571,9 @@ GitHub does not support creating repositories on push, so a small idempotent "en
 
 ## 18. Default Branch Config (2026-08-20)
 
-- New optional `github.default_branch` config: in `enable` state the script reconciles the GitHub repo's default branch via `PATCH /repos/{owner}/{repo}`, combined into the same PATCH as visibility.
-- The target branch must already exist on GitHub (mirror synced) before it can be set; otherwise skipped with a warning and retried on next run.
+- New optional `github.default_branch` config: in `enable` state the script reconciles the default branch on **both** Gitea and GitHub via `PATCH /repos/{owner}/{repo}`, combined into the same GitHub PATCH as visibility.
+- Empty branch params fall back to the common git default branch names (`main` first, then `master`).
+- The target branch must already exist on GitHub (mirror synced) before the GitHub default branch can be set; otherwise skipped with a warning and retried on next run. Gitea side is updated regardless (branch exists locally).
 - Current repo `gitea-push-github` config sets `default_branch: no-ci` on both branches.
 
 # End of Context
