@@ -204,8 +204,11 @@ github:
 **方式一：cron 全量扫描**（推荐默认）
 
 ```bash
+# 先建日志目录（仅一次；~/.local 为 XDG 用户目录）
+mkdir -p ~/.local/log
+
 # crontab -e 追加（见 examples/crontab.txt；替换 <owner> 与脚本绝对路径）
-*/10 * * * * /usr/bin/python3 /path/to/gitea-push-github/sync/gitea_github_sync.py --repo-owner <owner> >> /var/log/gitea-push-github.log 2>&1
+*/10 * * * * /usr/bin/python3 /path/to/gitea-push-github/sync/gitea_github_sync.py --repo-owner <owner> >> ~/.local/log/gitea-push-github.log 2>&1
 ```
 
 新仓库创建后最多延迟一个 cron 周期（建议 5–15 分钟）自动完成；幂等，重复运行无副作用；空/归档/镜像仓库自动跳过。
@@ -219,7 +222,7 @@ exec /path/to/gitea-push-github/sync/gitea_github_sync.py \
   --repo-owner "$GITEA_REPO_USER_NAME" \
   --repo-name "$GITEA_REPO_NAME" \
   --credentials /home/<user>/.config/gitea-push-github/gitea-push-github.env \
-  >> /var/log/gitea-push-github.log 2>&1
+  >> ~/.local/log/gitea-push-github.log 2>&1
 ```
 
 > 先执行 `--dry-run` 预览：`python3 sync/gitea_github_sync.py --repo-owner <owner> --dry-run`（单仓库加 `--repo-name`），只打印将执行的动作，不实际创建/删除/修改。
@@ -240,7 +243,7 @@ git push origin main
 - **修改可见性**：改 `private` 后 push，`enable` 状态下脚本会 PATCH 收敛；
 - **修改默认分支**：改 `default_branch` 后 push，`enable` 状态下脚本会同时 PATCH Gitea 与 GitHub 的默认分支；
 - **修改描述**：改 Gitea 仓库 description 后 push，`enable` 状态下脚本会把 GitHub 的 description（About）收敛为一致；
-- **验证**：查看脚本日志（`/var/log/gitea-push-github.log`）与 Gitea 仓库“推送镜像”设置页。
+- **验证**：查看脚本日志（`~/.local/log/gitea-push-github.log`）与 Gitea 仓库“推送镜像”设置页。
 
 ## 6. 同步工具说明
 

@@ -10,6 +10,8 @@
 #   {{CREDENTIALS}}  本地凭据文件（形如 --credentials /path/xxx.env；
 #                    留空则使用脚本默认 ~/.config/gitea-push-github/...）
 #
+# 日志目录先建一次：mkdir -p ~/.local/log（无 /var/log 写权限时可用此用户目录）
+#
 # Gitea 为 git hook 提供 GITEA_REPO_USER_NAME / GITEA_REPO_NAME 环境变量。
 set -u
 
@@ -17,4 +19,4 @@ exec {{SYNC_SCRIPT}} \
   --repo-owner "$GITEA_REPO_USER_NAME" \
   --repo-name "$GITEA_REPO_NAME" \
   {{CREDENTIALS}} \
-  >> /var/log/gitea-push-github.log 2>&1
+  >> ~/.local/log/gitea-push-github.log 2>&1
