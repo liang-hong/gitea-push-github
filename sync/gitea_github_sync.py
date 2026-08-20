@@ -47,6 +47,14 @@
   GITEA_API_URL=https://git.example.com
   GITEA_TOKEN=xxxx
 
+可选 SMTP（token 过期时邮件提醒；未配置则只记日志）：
+  SMTP_HOST=smtp.qq.com
+  SMTP_PORT=465
+  SMTP_USER=octocat@example.com
+  SMTP_PASSWORD=授权码
+  SMTP_FROM=octocat@example.com   # 缺省同 SMTP_USER
+  MAIL_TO=octocat@example.com     # 缺省同 SMTP_USER
+
 GitHub 建库使用 GitHub 官方 REST API（也可用官方 gh CLI 手动/辅助完成，
 如 gh repo create <name> --private）。
 """
@@ -299,6 +307,54 @@ def http_request(method, url, headers, body=None):
         return error.code, payload
 
 
+def github_token_valid(token):
+    """校验 GitHub token 是否有效（无效/过期返回 False）。GET /rate_limit 无需 scope。"""
+    code, _ = http_request("GET", f"{GITHUB_API}/rate_limit", github_headers(token))
+    return code == 200
+
+
+def send_expiry_email(creds, owner, repo):
+    """SMTP 邮件提醒 GitHub token 过期（凭据文件未配 SMTP 时仅记日志，不阻塞）。"""
+    host = creds.get("SMTP_HOST")
+    if not host:
+        log("未配置 SMTP_HOST，跳过邮件提醒（可在凭据文件添加 SMTP_* 配置）")
+        return
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+
+        port = int(creds.get("SMTP_PORT") or 465)
+        user = creds.get("SMTP_USER") or ""
+        password = creds.get("SMTP_PASSWORD") or ""
+        sender = creds.get("SMTP_FROM") or user
+        to = creds.get("MAIL_TO") or user
+        body = (
+            f"gitea-push-github 检测到 GitHub Token 无效或已过期：{owner}/{repo}\n\n"
+            "已删除该仓库的 Gitea Push Mirror（云端 GitHub 仓库数据未改动）。\n"
+            "请在 GitHub 网页重新生成 fine-grained token，并更新凭据文件：\n"
+            "  ~/.config/gitea-push-github/gitea-push-github.env\n"
+            "更新后下次 cron 运行将自动重建 Push Mirror。\n"
+        )
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = f"[gitea-push-github] GitHub Token 已过期: {owner}/{repo}"
+        msg["From"] = sender
+        msg["To"] = to
+        if port == 465:
+            server = smtplib.SMTP_SSL(host, port, timeout=15)
+        else:
+            server = smtplib.SMTP(host, port, timeout=15)
+            server.starttls()
+        try:
+            if user:
+                server.login(user, password)
+            server.sendmail(sender, [to], msg.as_string())
+        finally:
+            server.quit()
+        log(f"邮件提醒已发送至 {to}")
+    except Exception as exc:
+        log(f"邮件提醒发送失败: {exc}")
+
+
 def github_get_repo(owner, repo, token):
     """获取 GitHub 仓库信息（含可见性 private 字段）。"""
     return http_request("GET", f"{GITHUB_API}/repos/{owner}/{repo}", github_headers(token))
@@ -548,6 +604,17 @@ def ensure_repo(owner, repo, creds, dry_run=False):
         return suspend_push_mirror(gitea_api_url, owner, repo, gitea_token, remote_address, dry_run)
 
     # ---- state == "enable" ----
+    # 先校验 GitHub token：过期则删除 Push Mirror 并邮件提醒，不动云端 GitHub 数据
+    if not github_token_valid(github_token):
+        log("GitHub Token 无效或已过期（HTTP 401），删除 Push Mirror 暂停同步")
+        suspend_push_mirror(gitea_api_url, owner, repo, gitea_token, remote_address, dry_run)
+        if dry_run:
+            log("dry-run: 将发送 token 过期邮件提醒")
+        else:
+            send_expiry_email(creds, owner, repo)
+        log("请更新凭据文件后重试（下次运行自动重建 Push Mirror）")
+        return False
+
     private = config_private(config)
     default_branch = config_default_branch(config)
     log(
