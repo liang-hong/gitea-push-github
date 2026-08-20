@@ -114,7 +114,7 @@ gitea-push-github/
 
 ### 5.1 准备本地凭据文件
 
-GitHub PAT 与 Gitea API Token **只保存在服务器本地固定位置**，绝不写入任何仓库。
+GitHub Token 与 Gitea API Token **只保存在服务器本地固定位置**，绝不写入任何仓库。申请步骤见下文「5.3 申请 Token」。
 
 ```bash
 mkdir -p ~/.config/gitea-push-github
@@ -134,11 +134,6 @@ GITHUB_TOKEN=github_pat_xxxx
 GITEA_API_URL=https://git.example.com
 GITEA_TOKEN=xxxx
 ```
-
-Token 权限：
-
-- **GitHub Token**：经典 PAT 勾选 `repo`；Fine-grained Token 勾选 **Administration**（创建/改仓库可见性需要 write）与 **Contents**（push 需要 write）；
-- **Gitea Token**：勾选 `write:repository`（检查/创建/删除 Push Mirror 所需的最小权限）。
 
 ### 5.2 仓库内同步配置 `.github-sync.yml`
 
@@ -166,7 +161,41 @@ github:
 - **多分支仓库**：仅当**全部分支**都有 `.github-sync.yml` 且内容一致（忽略注释）时才执行策略；任一分支缺失或不一致 → 按 `disable` 处理（不报错）；
 - 可见性：公开仓库 + 配置 `private: true` → 自动改回私有；私有仓库改公开需显式 `private: false`，脚本会打印警告。
 
-### 5.3 初始化自动化（二选一或并用）
+### 5.3 申请 Token（GitHub / Gitea）
+
+#### 5.3.1 GitHub：Fine-grained Token
+
+操作步骤：
+
+1. 登录 GitHub → 右上角头像 → **Settings**；
+2. 左下角 **Developer settings** → **Personal access tokens** → **Fine-grained tokens**；
+3. 点 **Generate new token**；
+4. 填写字段：
+   - **Token name**：如 `gitea-push-github`；
+   - **Expiration**：建议较短（如 90 天，到期后到本文件更新 Token）；
+   - **Resource owner**：选你自己的账户；
+   - **Repository access**：选 **All repositories**——本方案会为以后**新建**的仓库在 GitHub 建库，选 Selected repositories 则新建仓库不在访问范围内，需手动逐个添加；
+5. **Repository permissions** 勾选：
+   - **Administration** → **Read and write**（创建仓库、修改可见性必需）；
+   - **Contents** → **Read and write**（向 GitHub push 代码必需；Metadata read 自动附带）；
+6. 点 **Generate token** → **立即复制**：令牌**只显示一次**，关闭页面后无法再查看。
+
+注意：
+
+- 仓库不在 Fine-grained Token 访问范围内时，API 会返回 404/403，脚本按对应状态报错；
+- 权限不足（如 Administration 缺 write）时，创建仓库/修改可见性会失败，脚本打印 HTTP 错误并退出 1。
+
+#### 5.3.2 Gitea：API Token
+
+操作步骤：
+
+1. 登录 Gitea → 右上角头像 → **设置（Settings）**；
+2. 左侧菜单 **应用（Applications）**；
+3. 「生成新令牌（Generate New Token）」区块，填写令牌名称（如 `gitea-push-github`）；
+4. 权限勾选 **repository：write**（即 `write:repository`）——检查/创建/删除 Push Mirror 所需的最小权限；
+5. 点 **生成令牌** → **立即复制**：令牌**只显示一次**。
+
+### 5.4 初始化自动化（二选一或并用）
 
 **方式一：cron 全量扫描**（推荐默认）
 
@@ -191,7 +220,7 @@ exec /path/to/gitea-push-github/sync/gitea_github_sync.py \
 
 > 先执行 `--dry-run` 预览：`python3 sync/gitea_github_sync.py --repo-owner <owner> --dry-run`（单仓库加 `--repo-name`），只打印将执行的动作，不实际创建/删除/修改。
 
-### 5.4 启用 / 修改 / 停用
+### 5.5 启用 / 修改 / 停用
 
 所有操作都在目标仓库主目录改 `.github-sync.yml` 并 push 即可（无需改脚本）：
 
