@@ -208,7 +208,7 @@ github:
 1. 登录 Gitea → 右上角头像 → **设置（Settings）**；
 2. 左侧菜单 **应用（Applications）**；
 3. 「生成新令牌（Generate New Token）」区块，填写令牌名称（如 `gitea-push-github`）；
-4. 权限勾选 **repository：write**（即 `write:repository`）——检查/创建/删除 Push Mirror 所需的最小权限；
+4. 权限勾选 **repository：write**（即 `write:repository`）与 **user：read**（即 `read:user`）——`read:user` 为 **cron 全量扫描**列出仓库所必需；仅用 post-receive hook 单仓库模式可只勾 `write:repository`；
 5. 点 **生成令牌** → **立即复制**：令牌**只显示一次**。
 
 ### 5.4 初始化自动化（二选一或并用）
@@ -320,7 +320,7 @@ python3 -m unittest discover -s tests -v
 
 - **凭据本地化**：GitHub PAT 与 Gitea API Token 只保存在服务器本地 `~/.config/gitea-push-github/gitea-push-github.env`（权限 600）；脚本不打印、不落盘、不进仓库；
 - `.gitignore` 已忽略 `*.env` / `.env`，防止误提交；
-- 遵循最小权限：GitHub Token 仅授予本方案所需 scope，Gitea Token 仅 `write:repository`；
+- 遵循最小权限：GitHub Token 仅授予本方案所需 scope；Gitea Token 勾选 `read:user` + `write:repository`（`read:user` 供 cron 全量扫描，`write:repository` 供镜像管理）；
 - post-receive hook 内容存于 Gitea 数据库（非仓库文件）；建议使用绝对路径与日志重定向；
 - 非破坏性方向：脚本只创建缺失的 GitHub 仓库与 Mirror、按配置收敛可见性、按 `suspend` 精确删除匹配 Mirror；`remove/disable` 及缺失配置一律不动已有内容。
 
