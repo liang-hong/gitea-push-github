@@ -49,15 +49,20 @@ def encode_file(text):
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def with_api_config(base_handler, branches=("main",), repo_texts=None):
+def with_api_config(base_handler, branches=("main",), repo_texts=None, token_valid=True):
     """包装 base_handler，注入 Gitea 分支列表与各分支 .github-sync.yml 读取响应。
 
     repo_texts: {repo_name: {branch: 内容}}；未列出的 (repo, branch) 视为缺失(404)。
+    token_valid=False 时模拟 GitHub token 过期（/rate_limit 返回 401）。
     """
     repo_texts = repo_texts or {}
 
     def handler(request, **kwargs):
         url = request.full_url
+        if request.method == "GET" and url.startswith("https://api.github.com/rate_limit"):
+            if token_valid:
+                return make_response(200, {"rate": {}})
+            raise make_http_error(401, {"message": "Bad credentials"})
         if request.method == "GET" and "/branches" in url and "git.example.com" in url:
             return make_response(200, [{"name": b} for b in branches])
         if (
@@ -224,6 +229,44 @@ class RepoConfigApiTest(unittest.TestCase):
         with fake_urlopen(side_effect=handler):
             cfg = sync.load_repo_config_via_api(self.GITEA, "alice", "repo", "tok")
         self.assertIsNone(cfg)
+
+    def test_github_token_valid(self):
+        def handler(request, **kwargs):
+            url = request.full_url
+            if "/rate_limit" in url:
+                return make_response(200, {"rate": {}})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            self.assertTrue(sync.github_token_valid("tok"))
+
+    def test_github_token_invalid(self):
+        def handler(request, **kwargs):
+            url = request.full_url
+            if "/rate_limit" in url:
+                raise make_http_error(401, {"message": "Bad credentials"})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            self.assertFalse(sync.github_token_valid("tok"))
+
+    def test_send_expiry_email(self):
+        creds = {
+            "SMTP_HOST": "smtp.qq.com",
+            "SMTP_PORT": "465",
+            "SMTP_USER": "me@qq.com",
+            "SMTP_PASSWORD": "authcode",
+            "MAIL_TO": "me@qq.com",
+        }
+        with mock.patch("smtplib.SMTP_SSL") as smtp_cls:
+            sync.send_expiry_email(creds, "alice", "repo")
+        server = smtp_cls.return_value
+        server.login.assert_called_once_with("me@qq.com", "authcode")
+        server.sendmail.assert_called_once()
+        server.quit.assert_called_once()
+
+    def test_send_expiry_email_without_smtp_config(self):
+        sync.send_expiry_email({}, "alice", "repo")  # 仅记日志，不抛异常
 
 
 
@@ -572,6 +615,54 @@ class SyncMainTest(unittest.TestCase):
             rc = sync.main(self.base_args() + ["--repo-name", "repo"])
         self.assertEqual(rc, 0)
         self.assertEqual(sum(1 for c in calls if c.method == "PATCH"), 1)
+
+    def test_single_repo_enable_token_expired_removes_mirror(self):
+        calls = []
+
+        def base_handler(request, **kwargs):
+            calls.append(request)
+            url = request.full_url
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [{
+                    "remote_address": "https://github.com/octocat/repo.git",
+                    "remote_name": "push_mirror_1",
+                }])
+            if request.method == "DELETE" and url.endswith("/push_mirrors/push_mirror_1"):
+                return make_response(204, None)
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        handler = with_api_config(
+            base_handler,
+            repo_texts={"repo": {"main": "github:\n  state: enable\n"}},
+            token_valid=False,
+        )
+        with mock.patch.object(sync, "send_expiry_email") as send_mail:
+            with fake_urlopen(side_effect=handler):
+                rc = sync.main(self.base_args() + ["--repo-name", "repo"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(sum(1 for c in calls if c.method == "DELETE"), 1)
+        send_mail.assert_called_once()
+
+    def test_single_repo_enable_token_expired_dry_run_no_mutation(self):
+        def base_handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [{
+                    "remote_address": "https://github.com/octocat/repo.git",
+                    "remote_name": "push_mirror_1",
+                }])
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        handler = with_api_config(
+            base_handler,
+            repo_texts={"repo": {"main": "github:\n  state: enable\n"}},
+            token_valid=False,
+        )
+        with mock.patch.object(sync, "send_expiry_email") as send_mail:
+            with fake_urlopen(side_effect=handler):
+                rc = sync.main(self.base_args() + ["--repo-name", "repo", "--dry-run"])
+        self.assertEqual(rc, 1)
+        send_mail.assert_not_called()
 
     def test_single_repo_suspend_deletes_matching_mirror(self):
         calls = []
