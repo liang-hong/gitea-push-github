@@ -1,5 +1,7 @@
 # Gitea → GitHub 自动推送镜像管理（零 CI 方案）
 
+**注意：本仓库完全由AI生成，使用deepseek:deepseek-v4-flash模型和vscode cline插件。仓库仅在个人使用场景正常部署运行，不适用且未验证团队和生产环境使用稳定性**
+
 基于 **Gitea 官方 Push Mirror + GitHub 官方 API** 的自动化备份方案，**不需要任何 CI/CD 组件**：
 
 - **持续性同步**：Gitea 原生 Push Mirror（`sync_on_commit`）负责，配置好后每次 `git push` 到 Gitea 即时自动同步到 GitHub，并带定时兜底；
@@ -8,7 +10,7 @@
 
 > 为什么不需要 CI：镜像同步本身完全由 Gitea Push Mirror 完成；脚本只做幂等的“初始化/状态收敛”，cron 或 post-receive hook 足够，无需常驻服务。详见[与 CI 方案的对比](#7-与-ci-方案的对比)。
 >
-> 本仓库即该方案的实现：说明文档、同步工具、hook/cron 模板与单元测试。需求背景与演进见 [`CONTEXT.md`](CONTEXT.md)。**当前尚未部署**，请先阅读本文并在测试环境验证后再上线。
+> 本仓库即该方案的实现：说明文档、同步工具、hook/cron 模板与单元测试。需求背景与演进见 [`CONTEXT.md`](CONTEXT.md)。
 
 ## 目录
 
@@ -68,7 +70,7 @@ Gitea（本地主仓库）
 | ---- | ---- |
 | Gitea | 本地主仓库，推送入口，Push Mirror 的执行方（同步主干） |
 | GitHub | 云端备份 / 分发镜像（默认私有） |
-| sync 脚本（`sync/`）| 幂等状态收敛：建 GitHub 库 + 配 Push Mirror + 删 Mirror + 收敛可见性 |
+| sync 脚本（`sync/`）| 幂等状态收敛：建 GitHub 库 + 配 Push Mirror + 删 Mirror + 收敛可见性与默认分支 |
 | cron / post-receive hook | 初始化触发源（无需常驻服务） |
 | 本地凭据文件 | 集中存放 GitHub PAT 与 Gitea API Token（服务器上，不在仓库中） |
 
@@ -80,7 +82,7 @@ Gitea（本地主仓库）
 
 1. 读取仓库主目录 `.github-sync.yml`（固定位置/文件名，经 Gitea API）；
 2. 多分支仓库：仅当全部分支都有该文件且内容一致（忽略注释）时才执行策略，否则按 `disable` 处理（不报错）；
-3. `state: enable` → 检查/创建 GitHub 仓库并**收敛可见性**（PATCH），检查/创建 Push Mirror；
+3. `state: enable` → 检查/创建 GitHub 仓库并**收敛可见性**（PATCH）、按配置**收敛默认分支**（Gitea + GitHub PATCH），检查/创建 Push Mirror；
 4. `state: suspend` → 删除指向本方案 GitHub 仓库的 Push Mirror（保留 GitHub 仓库，停止更新）；
 5. `state: remove` / `disable`（缺省）→ 不创建也不删除任何内容。
 
@@ -88,7 +90,7 @@ Gitea（本地主仓库）
 - cron 全量扫描：新仓库最多延迟一个 cron 周期；
 - post-receive hook：push 后即时处理该仓库。
 
-**声明式配置**：仓库行为完全由 `.github-sync.yml` 的 `state` / `private` 决定，无需改动脚本。
+**声明式配置**：仓库行为完全由 `.github-sync.yml` 的 `state` / `private` / `default_branch` 决定，无需改动脚本。
 
 ## 4. 仓库结构
 
@@ -151,7 +153,7 @@ github:
 
 | state | 行为 |
 | ---- | ---- |
-| `enable` | 创建/补齐：GitHub 无同名仓库则创建（默认私有）；已存在则按配置**收敛可见性**（PATCH）；Push Mirror 缺失则创建（保留已存在者） |
+| `enable` | 创建/补齐：GitHub 无同名仓库则创建（默认私有）；已存在则按配置**收敛可见性与默认分支**（PATCH，Gitea 侧同步）；Push Mirror 缺失则创建（保留已存在者） |
 | `suspend` | 停止更新：删除指向本方案 GitHub 仓库的 Gitea Push Mirror；GitHub 仓库保留不删 |
 | `remove` / `disable` | 不受管理：不创建也不删除 GitHub 仓库 / Push Mirror（二者等同） |
 
@@ -236,6 +238,7 @@ git push origin main
 - **停止更新**：`state: suspend` → push 后脚本删除该仓库的 Gitea Push Mirror，GitHub 仓库保留不删；
 - **退出管理**：`state: remove`（或 `disable`，或删除该文件）→ 已有 GitHub 仓库与 Push Mirror 均不会被删除或修改，脚本不报错；
 - **修改可见性**：改 `private` 后 push，`enable` 状态下脚本会 PATCH 收敛；
+- **修改默认分支**：改 `default_branch` 后 push，`enable` 状态下脚本会同时 PATCH Gitea 与 GitHub 的默认分支；
 - **验证**：查看脚本日志（`/var/log/gitea-push-github.log`）与 Gitea 仓库“推送镜像”设置页。
 
 ## 6. 同步工具说明
