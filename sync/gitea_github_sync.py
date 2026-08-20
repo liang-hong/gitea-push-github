@@ -8,7 +8,8 @@
      suspend  - 删除指向本方案 GitHub 仓库的 Gitea Push Mirror；GitHub 仓库保留不删
      remove/disable（缺省） - 不创建也不删除任何内容
      state 值非法时报错；配置文件缺失时按 disable 处理（不修改已有 Push Mirror、不报错）。
-  2. state=enable 时检查 GitHub 仓库是否存在，不存在则以 private=true（默认）创建。
+  2. state=enable 时检查 GitHub 仓库是否存在：不存在则以 private=true（默认）创建；
+     已存在则按配置收敛可见性（PATCH）。
   3. state=enable 时检查 Gitea Push Mirror 是否存在，不存在则创建。
   创建完成后，后续每次 push 由 Gitea Push Mirror（sync_on_commit）自动同步到 GitHub；
   本脚本只负责“初始化/兜底”，不需要任何 CI 组件。
@@ -271,9 +272,15 @@ def http_request(method, url, headers, body=None):
         return error.code, payload
 
 
-def github_repo_exists(owner, repo, token):
-    code, _ = http_request("GET", f"{GITHUB_API}/repos/{owner}/{repo}", github_headers(token))
-    return code == 200
+def github_get_repo(owner, repo, token):
+    """获取 GitHub 仓库信息（含可见性 private 字段）。"""
+    return http_request("GET", f"{GITHUB_API}/repos/{owner}/{repo}", github_headers(token))
+
+
+def github_update_repo_private(owner, repo, private, token):
+    """PATCH 修改已存在 GitHub 仓库的可见性。"""
+    body = {"private": private}
+    return http_request("PATCH", f"{GITHUB_API}/repos/{owner}/{repo}", github_headers(token), body)
 
 
 def github_create_repo(repo, private, token, description):
@@ -398,7 +405,7 @@ def ensure_repo(owner, repo, creds, config_arg=None, dry_run=False):
     """按 .github-sync.yml 的 github.state 幂等收敛到目标状态。返回是否成功。
 
     state:
-      enable  - GitHub 仓库缺失则创建；Push Mirror 缺失则创建（保留已存在者）
+      enable  - GitHub 仓库缺失则创建、已存在则按配置收敛可见性；Push Mirror 缺失则创建（保留已存在者）
       suspend - 删除指向本方案 GitHub 的 Push Mirror（保留 GitHub 仓库，停止更新）
       remove/disable（缺省） - 不创建也不删除任何内容（无操作）
     非法 state 值报错并返回 False。dry_run=True 时只打印将执行的动作，不发起写操作。
@@ -432,23 +439,44 @@ def ensure_repo(owner, repo, creds, config_arg=None, dry_run=False):
 
     # ---- state == "enable" ----
     private = config_private(config)
-    log(f"{owner}/{repo}: state=enable，云端仓库创建时可见性 private={private}")
+    log(f"{owner}/{repo}: state=enable，目标可见性 private={private}")
     description = f"Mirror of {owner}/{repo} (managed by gitea-push-github)"
 
-    # ---- 步骤 1: GitHub 仓库检查 / 创建 ----
-    if github_repo_exists(github_username, repo, github_token):
-        log(f"GitHub 仓库 {github_username}/{repo} 已存在，跳过创建")
-    elif dry_run:
-        log(f"dry-run: 将创建 GitHub 仓库 {github_username}/{repo} (private={private})")
-    else:
-        log(f"GitHub 仓库 {github_username}/{repo} 不存在，开始创建 (private={private})")
-        code, payload = github_create_repo(repo, private, github_token, description)
-        if code in (200, 201):
-            log("GitHub 仓库创建成功")
+    # ---- 步骤 1: GitHub 仓库检查 / 创建 / 可见性收敛 ----
+    code, payload = github_get_repo(github_username, repo, github_token)
+    if code == 200 and isinstance(payload, dict):
+        current_private = payload.get("private")
+        if current_private is not None and bool(current_private) != private:
+            if not private:
+                log(f"警告: GitHub 仓库 {github_username}/{repo} 将由私有改为公开（private=false）")
+            if dry_run:
+                log(f"dry-run: 将 PATCH 更新可见性 {github_username}/{repo} private={private}")
+            else:
+                code2, payload2 = github_update_repo_private(github_username, repo, private, github_token)
+                if code2 in (200, 204):
+                    log(f"GitHub 仓库可见性已更新: {github_username}/{repo} private={private}")
+                else:
+                    reason = payload2.get("message", payload2) if isinstance(payload2, dict) else payload2
+                    log(f"GitHub 仓库可见性更新失败 (HTTP {code2}): {reason}")
+                    return False
         else:
-            reason = payload.get("message", payload) if isinstance(payload, dict) else payload
-            log(f"GitHub 仓库创建失败 (HTTP {code}): {reason}")
-            return False
+            log(f"GitHub 仓库 {github_username}/{repo} 已存在，可见性一致，跳过创建")
+    elif code == 404:
+        if dry_run:
+            log(f"dry-run: 将创建 GitHub 仓库 {github_username}/{repo} (private={private})")
+        else:
+            log(f"GitHub 仓库 {github_username}/{repo} 不存在，开始创建 (private={private})")
+            code, payload = github_create_repo(repo, private, github_token, description)
+            if code in (200, 201):
+                log("GitHub 仓库创建成功")
+            else:
+                reason = payload.get("message", payload) if isinstance(payload, dict) else payload
+                log(f"GitHub 仓库创建失败 (HTTP {code}): {reason}")
+                return False
+    else:
+        reason = payload.get("message", payload) if isinstance(payload, dict) else payload
+        log(f"GitHub 仓库检查失败 (HTTP {code}): {reason}")
+        return False
 
     # ---- 步骤 2: Gitea Push Mirror 检查 / 创建 ----
     code, payload = gitea_list_push_mirrors(gitea_api_url, owner, repo, gitea_token)

@@ -190,17 +190,87 @@ class SyncMainTest(unittest.TestCase):
 
     def test_single_repo_existing_skipped(self):
         config = self.write_config("github:\n  state: enable\n")
+        calls = []
 
         def handler(request, **kwargs):
+            calls.append(request)
             url = request.full_url
             if request.method == "GET" and "/repos/octocat/repo" in url and "api.github.com" in url:
-                return make_response(200, {"full_name": "octocat/repo"})
+                return make_response(200, {"private": True})
             if request.method == "GET" and "push_mirrors" in url:
                 return make_response(200, [{"remote_address": "https://github.com/octocat/repo.git"}])
             raise AssertionError(f"unexpected {request.method} {url}")
 
         with fake_urlopen(side_effect=handler):
             rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(1 for c in calls if c.method == "PATCH"), 0)
+
+    def test_single_repo_existing_visibility_mismatch_patches(self):
+        # 仓库已存在且可见性与配置不一致（私有->公开，需配置显式 private: false）
+        config = self.write_config("github:\n  state: enable\n  private: false\n")
+        calls = []
+
+        def handler(request, **kwargs):
+            calls.append(request)
+            url = request.full_url
+            if request.method == "GET" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
+                return make_response(200, {"private": True})
+            if request.method == "PATCH" and url.endswith("/repos/octocat/repo"):
+                body = json.loads(request.data)
+                self.assertFalse(body["private"])
+                return make_response(200, {"private": False})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            if request.method == "POST" and "push_mirrors" in url:
+                return make_response(201, {})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(1 for c in calls if c.method == "PATCH"), 1)
+
+    def test_single_repo_existing_public_forced_private(self):
+        # 公开仓库 + 配置默认私有(true) -> PATCH 收敛回私有
+        config = self.write_config("github:\n  state: enable\n")
+        calls = []
+
+        def handler(request, **kwargs):
+            calls.append(request)
+            url = request.full_url
+            if request.method == "GET" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
+                return make_response(200, {"private": False})
+            if request.method == "PATCH" and url.endswith("/repos/octocat/repo"):
+                body = json.loads(request.data)
+                self.assertTrue(body["private"])
+                return make_response(200, {"private": True})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            if request.method == "POST" and "push_mirrors" in url:
+                return make_response(201, {})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo", "--config", config])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(1 for c in calls if c.method == "PATCH"), 1)
+
+    def test_single_repo_visibility_mismatch_dry_run_no_patch(self):
+        config = self.write_config("github:\n  state: enable\n  private: false\n")
+
+        def handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
+                return make_response(200, {"private": True})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(
+                self.base_args() + ["--repo-name", "repo", "--config", config, "--dry-run"]
+            )
         self.assertEqual(rc, 0)
 
     def test_single_repo_suspend_deletes_matching_mirror(self):
