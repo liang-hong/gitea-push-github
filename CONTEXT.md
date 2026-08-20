@@ -560,6 +560,7 @@ GitHub does not support creating repositories on push, so a small idempotent "en
   - `remove` / `disable` — no-op: never create nor delete GitHub repo / Push Mirror.
 - Illegal `state` value → error, exit code 1. Missing config file → default `disable`, no error, existing push mirror untouched.
 - Push mirror deletion uses Gitea `DELETE /repos/{owner}/{repo}/push_mirrors/{name}` keyed by `remote_name`, matched only against the exact managed `remote_address`.
+- In `enable` state the script also reconciles GitHub repo visibility: existing repo is `PATCH`ed to the configured `private` value (public→private is automatic; private→public requires explicit `private: false` and logs a warning).
 - Safety: scan-all mode ignores local `--config` (each repo config read via Gitea API) to prevent one config from affecting all repos; added `--dry-run` to preview changes before any mutation.
 
 # End of Context

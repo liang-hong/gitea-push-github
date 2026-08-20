@@ -11,4 +11,4 @@
 # 注意：state 写成其他任何值（如 foo / true）都会导致脚本报错（退出码 1）。
 github:
   state: disable   # enable / suspend / remove / disable；默认 disable（等同 remove）
-  private: true    # GitHub 云端仓库可见性（创建时生效）；默认 true
+  private: true    # GitHub 云端仓库可见性（创建时生效，之后每次收敛也生效）；默认 true

@@ -197,7 +197,7 @@ github:
 
 | state | 行为 |
 | ---- | ---- |
-| `enable` | 创建/补齐：GitHub 无同名仓库则创建（默认私有）；Gitea Push Mirror 缺失则创建（保留已存在者） |
+| `enable` | 创建/补齐：GitHub 无同名仓库则创建（默认私有）；仓库已存在则按配置**收敛可见性**（PATCH）；Gitea Push Mirror 缺失则创建（保留已存在者） |
 | `suspend` | 停止更新：删除指向本方案 GitHub 仓库的 Gitea Push Mirror；GitHub 仓库保留不删 |
 | `remove` / `disable` | 不受管理：不创建也不删除 GitHub 仓库 / Push Mirror（二者等同） |
 
@@ -205,7 +205,7 @@ github:
 
 - 缺少本文件、无 `github` 段或未写 `state` → 等同 `disable`：不创建/删除任何内容、**不报错**；
 - `state` 写成其他任何值（如 `foo` / `true`）→ **脚本报错，退出码 1**；
-- `github.private` 缺省为 `true`（私有）；需要公开时显式写 `private: false`。
+- `github.private` 缺省为 `true`（私有）；需要公开时显式写 `private: false`。`state=enable` 时每次运行都会把已存在仓库的可见性收敛到配置值：仓库为公开而配置为私有 → 自动改回私有；仓库为私有而配置为公开 → 显式 `private: false` 才生效，脚本会打印警告。
 
 **启用步骤**：
 
@@ -238,12 +238,12 @@ push 后（cron 扫描或 hook 触发）：GitHub 上出现同名私有仓库，
 | 步骤 | 动作 | 幂等判定 |
 | ---- | ---- | -------- |
 | 1 | 读取 `.github-sync.yml` | 缺失/无 `state` → 等同 `disable`（不创建不删除、不报错）；`state` 非法 → 报错（退出码 1） |
-| 2 | `state=enable`：GitHub `GET /repos/{owner}/{repo}` | 200 已存在，跳过 |
+| 2 | `state=enable`：GitHub `GET /repos/{owner}/{repo}` | 200 已存在：`private` 与配置不一致 → PATCH 收敛；404 进入创建 |
 | 3 | `state=enable`：GitHub `POST /user/repos` | 仅当第 2 步返回 404 时执行；`private` 取配置（默认 `true`） |
-| 4 | `state=enable`：Gitea `GET .../push_mirrors` | 列表含目标地址即视为已存在 |
-| 5 | `state=enable`：Gitea `POST .../push_mirrors` | 仅当第 4 步未命中时执行 |
-| 6 | `state=suspend`：Gitea `DELETE .../push_mirrors/{remote_name}` | 仅删除 `remote_address` 精确匹配的 Push Mirror；GitHub 仓库不动 |
-
+| 4 | `state=enable`：GitHub `PATCH /repos/{owner}/{repo}` | 仅当第 2 步 200 且可见性与配置不一致时执行 |
+| 5 | `state=enable`：Gitea `GET .../push_mirrors` | 列表含目标地址即视为已存在 |
+| 6 | `state=enable`：Gitea `POST .../push_mirrors` | 仅当第 5 步未命中时执行 |
+| 7 | `state=suspend`：Gitea `DELETE .../push_mirrors/{remote_name}` | 仅删除 `remote_address` 精确匹配的 Push Mirror；GitHub 仓库不动 |
 **Push Mirror 参数**：`remote_address = https://github.com/{github_username}/{repo}.git`，`remote_username` 为 GitHub 用户名，`remote_password` 为 GitHub Token，`sync_on_commit = true`，`interval = 8h0m0s`（定时兜底）。
 
 **退出码**：单仓库模式 `0` 成功（含 `remove/disable` 跳过）、`1` 失败（含 `state` 非法）；全量模式汇总所有仓库，存在失败时返回 `1`。
@@ -273,7 +273,8 @@ push 后（cron 扫描或 hook 触发）：GitHub 上出现同名私有仓库，
 | `.github-sync.yml` 中 `state: remove` / `disable` | 同上，跳过 |
 | `state: suspend` | 删除匹配的 Gitea Push Mirror，保留 GitHub 仓库 |
 | `state` 为非法值（如 `foo` / `true`） | 报错，退出码 1 |
-| `--dry-run` | 只打印将执行动作，不实际创建/删除 |
+| 已存在仓库可见性与配置不一致（`enable`） | PATCH 收敛可见性（私有↔公开）；公开改私有安全，私有改公开需显式 `private: false` 并打印警告 |
+| `--dry-run` | 只打印将执行动作，不实际创建/删除/修改 |
 | GitHub 已有同名仓库 | 跳过创建，仅配置 Push Mirror |
 | 已存在 Push Mirror | 跳过，不产生重复 |
 | Mirror 被删除后再次扫描 / push | 检测缺失并自动重建 |
