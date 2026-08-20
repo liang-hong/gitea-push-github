@@ -9,8 +9,8 @@
      remove/disable（缺省） - 不创建也不删除任何内容
      多分支规则：仅当全部分支都有该文件且内容一致（忽略注释）时才执行策略；
      任一分支缺失或不一致 → 按 disable 处理（不报错）。state 值非法时报错。
-  2. state=enable 时检查 GitHub 仓库是否存在：不存在则以 private=true（默认）创建；
-     已存在则按配置收敛可见性（PATCH）与默认分支。
+  2. state=enable 时检查 GitHub 仓库是否存在：不存在则以 private=true（默认）创建（description 与 Gitea 一致）；
+     已存在则按配置收敛可见性（PATCH）、默认分支与 description。
   3. state=enable 时检查 Gitea Push Mirror 是否存在，不存在则创建。
   创建完成后，后续每次 push 由 Gitea Push Mirror（sync_on_commit）自动同步到 GitHub；
   本脚本只负责“初始化/兜底”，不需要任何 CI 组件。
@@ -318,6 +318,7 @@ def github_update_repo(owner, repo, fields, token):
 
 
 def github_create_repo(repo, private, token, description):
+    """创建 GitHub 仓库；description 与 Gitea 仓库一致。"""
     body = {
         "name": repo,
         "private": private,
@@ -518,7 +519,7 @@ def ensure_repo(owner, repo, creds, dry_run=False):
     一致（忽略注释）时执行策略，否则按 disable 处理（不报错）。
 
     state:
-      enable  - GitHub 仓库缺失则创建、已存在则按配置收敛可见性与默认分支；Gitea 默认分支也按配置收敛；Push Mirror 缺失则创建（保留已存在者）
+      enable  - GitHub 仓库缺失则创建（description 与 Gitea 一致）、已存在则按配置收敛可见性/默认分支/description；Gitea 默认分支也按配置收敛；Push Mirror 缺失则创建（保留已存在者）
       suspend - 删除指向本方案 GitHub 的 Push Mirror（保留 GitHub 仓库，停止更新）
       remove/disable（缺省） - 不创建也不删除任何内容（无操作）
     非法 state 值报错并返回 False。dry_run=True 时只打印将执行的动作，不发起写操作。
@@ -553,7 +554,14 @@ def ensure_repo(owner, repo, creds, dry_run=False):
         f"{owner}/{repo}: state=enable，目标可见性 private={private}，"
         f"默认分支 default_branch={default_branch or '(不改动)'}"
     )
-    description = f"Mirror of {owner}/{repo} (managed by gitea-push-github)"
+    # ---- 步骤 0: 读取 Gitea 仓库信息（description 与当前默认分支） ----
+    code, gitea_payload = gitea_get_repo(gitea_api_url, owner, repo, gitea_token)
+    if code != 200 or not isinstance(gitea_payload, dict):
+        reason = gitea_payload.get("message", gitea_payload) if isinstance(gitea_payload, dict) else gitea_payload
+        log(f"Gitea 仓库信息获取失败 (HTTP {code}): {reason}")
+        return False
+    gitea_description = gitea_payload.get("description") or ""
+    log(f"Gitea 仓库 {owner}/{repo} description={gitea_description!r}")
 
     # ---- 步骤 1: GitHub 仓库检查 / 创建 ----
     repo_payload = None
@@ -563,10 +571,10 @@ def ensure_repo(owner, repo, creds, dry_run=False):
         log(f"GitHub 仓库 {github_username}/{repo} 已存在")
     elif code == 404:
         if dry_run:
-            log(f"dry-run: 将创建 GitHub 仓库 {github_username}/{repo} (private={private})")
+            log(f"dry-run: 将创建 GitHub 仓库 {github_username}/{repo} (private={private}, description={gitea_description!r})")
         else:
-            log(f"GitHub 仓库 {github_username}/{repo} 不存在，开始创建 (private={private})")
-            code, payload = github_create_repo(repo, private, github_token, description)
+            log(f"GitHub 仓库 {github_username}/{repo} 不存在，开始创建 (private={private}, description={gitea_description!r})")
+            code, payload = github_create_repo(repo, private, github_token, gitea_description)
             if code in (200, 201) and isinstance(payload, dict):
                 repo_payload = payload
                 log("GitHub 仓库创建成功")
@@ -579,9 +587,9 @@ def ensure_repo(owner, repo, creds, dry_run=False):
         log(f"GitHub 仓库检查失败 (HTTP {code}): {reason}")
         return False
 
-    # ---- 步骤 1b: 收敛可见性与默认分支（合并为单次 PATCH） ----
+    # ---- 步骤 1b: 收敛可见性 / 默认分支 / description（合并为单次 PATCH） ----
     if repo_payload is None:
-        log("dry-run: 仓库创建后将按配置收敛可见性/默认分支")
+        log("dry-run: 仓库创建后将按配置收敛可见性/默认分支/描述")
     else:
         updates = {}
         current_private = repo_payload.get("private")
@@ -599,6 +607,9 @@ def ensure_repo(owner, repo, creds, dry_run=False):
                     updates["default_branch"] = default_branch
                 else:
                     log(f"警告: 分支 {default_branch} 尚未同步到 GitHub 仓库，暂不设置默认分支（镜像同步后下次运行生效）")
+        current_description = repo_payload.get("description") or ""
+        if current_description != gitea_description:
+            updates["description"] = gitea_description
         if updates:
             if dry_run:
                 log(f"dry-run: 将 PATCH 更新 GitHub 仓库 {github_username}/{repo} {updates}")
@@ -611,17 +622,12 @@ def ensure_repo(owner, repo, creds, dry_run=False):
                     log(f"GitHub 仓库更新失败 (HTTP {code2}): {reason}")
                     return False
         else:
-            log(f"GitHub 仓库 {github_username}/{repo} 可见性与默认分支均与配置一致，跳过")
+            log(f"GitHub 仓库 {github_username}/{repo} 可见性/默认分支/描述均与配置一致，跳过")
 
     # ---- 步骤 1c: 收敛 Gitea 默认分支（配置了 default_branch 时） ----
     if default_branch:
-        code, payload = gitea_get_repo(gitea_api_url, owner, repo, gitea_token)
-        if code != 200 or not isinstance(payload, dict):
-            reason = payload.get("message", payload) if isinstance(payload, dict) else payload
-            log(f"Gitea 仓库信息获取失败 (HTTP {code}): {reason}")
-            return False
         current_gitea_default = branch_or_default(
-            payload.get("default_branch"),
+            gitea_payload.get("default_branch"),
             lambda branch: gitea_branch_exists(gitea_api_url, owner, repo, branch, gitea_token),
         )
         if current_gitea_default != default_branch:

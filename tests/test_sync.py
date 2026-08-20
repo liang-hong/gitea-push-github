@@ -271,7 +271,10 @@ class SyncMainTest(unittest.TestCase):
             if request.method == "POST" and url == "https://api.github.com/user/repos":
                 body = json.loads(request.data)
                 self.assertTrue(body["private"])
+                self.assertEqual(body["description"], "")
                 return make_response(201, {"name": body["name"]})
+            if request.method == "GET" and url.endswith("/repos/alice/repo") and "git.example.com" in url:
+                return make_response(200, {"default_branch": "main"})
             if request.method == "GET" and "push_mirrors" in url:
                 return make_response(200, [])
             if request.method == "POST" and "push_mirrors" in url:
@@ -296,6 +299,8 @@ class SyncMainTest(unittest.TestCase):
             url = request.full_url
             if request.method == "GET" and "/repos/octocat/repo" in url and "api.github.com" in url:
                 return make_response(200, {"private": True})
+            if request.method == "GET" and url.endswith("/repos/alice/repo") and "git.example.com" in url:
+                return make_response(200, {"default_branch": "main"})
             if request.method == "GET" and "push_mirrors" in url:
                 return make_response(200, [{"remote_address": "https://github.com/octocat/repo.git"}])
             raise AssertionError(f"unexpected {request.method} {url}")
@@ -321,6 +326,8 @@ class SyncMainTest(unittest.TestCase):
                 body = json.loads(request.data)
                 self.assertFalse(body["private"])
                 return make_response(200, {"private": False})
+            if request.method == "GET" and url.endswith("/repos/alice/repo") and "git.example.com" in url:
+                return make_response(200, {"default_branch": "main"})
             if request.method == "GET" and "push_mirrors" in url:
                 return make_response(200, [])
             if request.method == "POST" and "push_mirrors" in url:
@@ -348,6 +355,8 @@ class SyncMainTest(unittest.TestCase):
                 body = json.loads(request.data)
                 self.assertTrue(body["private"])
                 return make_response(200, {"private": True})
+            if request.method == "GET" and url.endswith("/repos/alice/repo") and "git.example.com" in url:
+                return make_response(200, {"default_branch": "main"})
             if request.method == "GET" and "push_mirrors" in url:
                 return make_response(200, [])
             if request.method == "POST" and "push_mirrors" in url:
@@ -367,6 +376,8 @@ class SyncMainTest(unittest.TestCase):
             url = request.full_url
             if request.method == "GET" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
                 return make_response(200, {"private": True})
+            if request.method == "GET" and url.endswith("/repos/alice/repo") and "git.example.com" in url:
+                return make_response(200, {"default_branch": "main"})
             if request.method == "GET" and "push_mirrors" in url:
                 return make_response(200, [])
             raise AssertionError(f"unexpected {request.method} {url}")
@@ -536,6 +547,32 @@ class SyncMainTest(unittest.TestCase):
             rc = sync.main(self.base_args() + ["--repo-name", "repo"])
         self.assertEqual(rc, 0)
 
+    def test_single_repo_enable_reconciles_description(self):
+        config_text = "github:\n  state: enable\n"
+        calls = []
+
+        def base_handler(request, **kwargs):
+            calls.append(request)
+            url = request.full_url
+            if request.method == "GET" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
+                return make_response(200, {"private": True, "description": ""})
+            if request.method == "GET" and url.endswith("/repos/alice/repo") and "git.example.com" in url:
+                return make_response(200, {"default_branch": "main", "description": "hello"})
+            if request.method == "PATCH" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
+                self.assertEqual(json.loads(request.data), {"description": "hello"})
+                return make_response(200, {"private": True, "description": "hello"})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [])
+            if request.method == "POST" and "push_mirrors" in url:
+                return make_response(201, {})
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        handler = with_api_config(base_handler, repo_texts={"repo": {"main": config_text}})
+        with fake_urlopen(side_effect=handler):
+            rc = sync.main(self.base_args() + ["--repo-name", "repo"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(1 for c in calls if c.method == "PATCH"), 1)
+
     def test_single_repo_suspend_deletes_matching_mirror(self):
         calls = []
 
@@ -610,6 +647,8 @@ class SyncMainTest(unittest.TestCase):
             url = request.full_url
             if request.method == "GET" and "/repos/octocat/repo" in url and "api.github.com" in url:
                 raise make_http_error(404, {"message": "Not Found"})
+            if request.method == "GET" and url.endswith("/repos/alice/repo") and "git.example.com" in url:
+                return make_response(200, {"default_branch": "main"})
             if request.method == "GET" and "push_mirrors" in url:
                 return make_response(200, [])
             raise AssertionError(f"unexpected {request.method} {url}")
@@ -695,6 +734,8 @@ class SyncMainTest(unittest.TestCase):
                 raise make_http_error(404, {"message": "Not Found"})
             if request.method == "POST" and url == "https://api.github.com/user/repos":
                 return make_response(201, {"name": json.loads(request.data)["name"]})
+            if request.method == "GET" and url.endswith("/repos/alice/enabled-repo") and "git.example.com" in url:
+                return make_response(200, {"default_branch": "main"})
             if request.method == "GET" and "push_mirrors" in url:
                 return make_response(200, [])
             if request.method == "POST" and "push_mirrors" in url:
