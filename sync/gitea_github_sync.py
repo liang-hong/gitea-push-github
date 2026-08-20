@@ -3,10 +3,13 @@
 """Gitea -> GitHub 自动镜像供给脚本（幂等，无需 CI）。
 
 职责：
-  1. 读取仓库级配置 .github-sync.yml；缺省或 github.enabled != true 时跳过
-     （即“默认不同步”）。
-  2. 检查 GitHub 仓库是否存在，不存在则以 private=true（默认）创建。
-  3. 检查 Gitea Push Mirror 是否存在，不存在则创建。
+  1. 读取仓库级配置 .github-sync.yml，按 github.state 收敛到目标状态：
+     enable   - GitHub 无同名仓库则创建（private 默认 true）；Push Mirror 缺失则创建（保留已存在者）
+     suspend  - 删除指向本方案 GitHub 仓库的 Gitea Push Mirror；GitHub 仓库保留不删
+     remove/disable（缺省） - 不创建也不删除任何内容
+     state 值非法时报错；配置文件缺失时按 disable 处理（不修改已有 Push Mirror、不报错）。
+  2. state=enable 时检查 GitHub 仓库是否存在，不存在则以 private=true（默认）创建。
+  3. state=enable 时检查 Gitea Push Mirror 是否存在，不存在则创建。
   创建完成后，后续每次 push 由 Gitea Push Mirror（sync_on_commit）自动同步到 GitHub；
   本脚本只负责“初始化/兜底”，不需要任何 CI 组件。
 
@@ -17,9 +20,13 @@
   b) 单仓库（Gitea post-receive hook 按需触发）：
        gitea_github_sync.py --repo-owner <owner> --repo-name <name>
 
-仓库级配置 .github-sync.yml（缺省即不同步，见 examples/github-sync.yml）：
+  --dry-run 只打印将执行的动作，不发起任何创建/删除（推荐先预览再执行）。
+
+仓库级配置 .github-sync.yml（缺省 state=disable 即不同步，见 examples/github-sync.yml）：
   github:
-    enabled: true    # true 才同步；默认 false
+    state: enable    # enable=创建 GitHub 仓库并保留/补齐 Push Mirror
+                     # suspend=删除 Gitea Push Mirror（保留 GitHub 仓库，停止更新）
+                     # remove/disable=不创建不删除（默认，二者等同）
     private: true    # GitHub 云端仓库可见性；默认 true（私有）
 
 凭据来源（优先级从高到低，详见 README）：
@@ -60,6 +67,10 @@ PUSH_MIRROR_INTERVAL = "8h0m0s"  # Gitea 定时兜底同步间隔
 DEFAULT_CREDENTIALS = "~/.config/gitea-push-github/gitea-push-github.env"
 REPO_CONFIG = ".github-sync.yml"
 PAGE_SIZE = 50
+
+# github.state 合法值；disable 等同 remove（缺省），详见 config_state()
+LEGAL_STATES = ("enable", "suspend", "remove", "disable")
+DEFAULT_STATE = "remove"
 
 
 def get_env(name, default=None):
@@ -188,13 +199,28 @@ def load_repo_config(path):
         return parse_repo_config_text(handle.read())
 
 
-def config_enabled(config):
+def config_state(config):
+    """读取 github.state 并归一化。返回 "enable" / "suspend" / "remove"。
+
+    缺配置、无 github 段或未写 state → 默认 "remove"（disable 等同 remove）。
+    state 值非法时抛 ValueError，由调用方转为错误退出。
+    """
     if not isinstance(config, dict):
-        return False
+        return DEFAULT_STATE
     section = config.get("github")
     if not isinstance(section, dict):
-        return False
-    return bool(section.get("enabled", False))
+        return DEFAULT_STATE
+    state = section.get("state")
+    if state is None:
+        return DEFAULT_STATE
+    state = str(state).strip().lower()
+    if state not in LEGAL_STATES:
+        raise ValueError(
+            f"github.state 非法: {state!r}（合法值: enable / suspend / remove / disable）"
+        )
+    if state == "disable":
+        state = DEFAULT_STATE
+    return state
 
 
 def config_private(config):
@@ -305,8 +331,17 @@ def gitea_get_file(api_url, owner, repo, path, ref, token):
 
 
 def gitea_list_push_mirrors(api_url, owner, repo, token):
-    url = f"{api_url}/{GITEA_API_PREFIX}/repos/{owner}/{repo}/push_mirrors"
+    url = f"{api_url}/{GITEA_API_PREFIX}/repos/{quote(owner)}/{quote(repo)}/push_mirrors"
     return http_request("GET", url, gitea_headers(token))
+
+
+def gitea_delete_push_mirror(api_url, owner, repo, name, token):
+    """按 remote_name 删除 Push Mirror；204/404 均视为删除成功（幂等）。"""
+    url = (
+        f"{api_url}/{GITEA_API_PREFIX}/repos/{quote(owner)}/{quote(repo)}"
+        f"/push_mirrors/{quote(str(name), safe='')}"
+    )
+    return http_request("DELETE", url, gitea_headers(token))
 
 
 def gitea_add_push_mirror(api_url, owner, repo, token, remote_address, username, password):
@@ -321,31 +356,90 @@ def gitea_add_push_mirror(api_url, owner, repo, token, remote_address, username,
     return http_request("POST", url, gitea_headers(token), body)
 
 
-def ensure_repo(owner, repo, creds, config_arg=None):
-    """幂等确保单个仓库：GitHub 云端仓库 + Gitea Push Mirror。返回是否成功。"""
+def suspend_push_mirror(api_url, owner, repo, token, remote_address, dry_run=False):
+    """state=suspend：删除指向 remote_address 的 Gitea Push Mirror，保留 GitHub 仓库。"""
+    code, payload = gitea_list_push_mirrors(api_url, owner, repo, token)
+    if code != 200:
+        reason = payload.get("message", payload) if isinstance(payload, dict) else payload
+        log(f"Push Mirror 列表获取失败 (HTTP {code}): {reason}")
+        return False
+
+    mirrors = payload if isinstance(payload, list) else []
+    matches = [
+        m
+        for m in mirrors
+        if isinstance(m, dict) and m.get("remote_address") == remote_address
+    ]
+    if not matches:
+        log(f"{owner}/{repo}: state=suspend，未找到匹配 Push Mirror ({remote_address})，无需删除")
+        return True
+
+    ok = True
+    for mirror in matches:
+        name = mirror.get("remote_name")
+        if not name:
+            log(f"{owner}/{repo}: Push Mirror 缺少 remote_name，无法删除，跳过")
+            ok = False
+            continue
+        if dry_run:
+            log(f"dry-run: 将删除 Push Mirror ({name}, {remote_address})")
+            continue
+        code, payload = gitea_delete_push_mirror(api_url, owner, repo, name, token)
+        if code in (204, 404):
+            log(f"Push Mirror 已删除 ({name}, {remote_address})")
+        else:
+            reason = payload.get("message", payload) if isinstance(payload, dict) else payload
+            log(f"Push Mirror 删除失败 (HTTP {code}): {reason}")
+            ok = False
+    return ok
+
+
+def ensure_repo(owner, repo, creds, config_arg=None, dry_run=False):
+    """按 .github-sync.yml 的 github.state 幂等收敛到目标状态。返回是否成功。
+
+    state:
+      enable  - GitHub 仓库缺失则创建；Push Mirror 缺失则创建（保留已存在者）
+      suspend - 删除指向本方案 GitHub 的 Push Mirror（保留 GitHub 仓库，停止更新）
+      remove/disable（缺省） - 不创建也不删除任何内容（无操作）
+    非法 state 值报错并返回 False。dry_run=True 时只打印将执行的动作，不发起写操作。
+    """
     github_username = creds.get("GITHUB_USERNAME")
     github_token = creds.get("GITHUB_TOKEN")
     gitea_api_url = (creds.get("GITEA_API_URL") or "").rstrip("/")
     gitea_token = creds.get("GITEA_TOKEN")
 
-    # 读取仓库级配置：本地 --config 优先，否则通过 Gitea API 读取 .github-sync.yml
+    # 读取仓库级配置：本地 --config 优先（仅单仓库模式），否则通过 Gitea API 读取 .github-sync.yml
     if config_arg:
         config = load_repo_config(config_arg)
     else:
         text = gitea_get_file(gitea_api_url, owner, repo, REPO_CONFIG, "HEAD", gitea_token)
         config = parse_repo_config_text(text) if text else None
-    if not config_enabled(config):
-        log(f"{owner}/{repo}: GitHub 同步未启用（缺少 .github-sync.yml 或 enabled != true），跳过")
-        return True
-    private = config_private(config)
-    log(f"{owner}/{repo}: 同步已启用，云端仓库创建时可见性 private={private}")
+
+    try:
+        state = config_state(config)
+    except ValueError as exc:
+        log(f"{owner}/{repo}: {exc}")
+        return False
 
     remote_address = f"https://github.com/{github_username}/{repo}.git"
+
+    if state == "remove":
+        log(f"{owner}/{repo}: state=remove（默认），不创建/删除任何内容，跳过")
+        return True
+
+    if state == "suspend":
+        return suspend_push_mirror(gitea_api_url, owner, repo, gitea_token, remote_address, dry_run)
+
+    # ---- state == "enable" ----
+    private = config_private(config)
+    log(f"{owner}/{repo}: state=enable，云端仓库创建时可见性 private={private}")
     description = f"Mirror of {owner}/{repo} (managed by gitea-push-github)"
 
     # ---- 步骤 1: GitHub 仓库检查 / 创建 ----
     if github_repo_exists(github_username, repo, github_token):
         log(f"GitHub 仓库 {github_username}/{repo} 已存在，跳过创建")
+    elif dry_run:
+        log(f"dry-run: 将创建 GitHub 仓库 {github_username}/{repo} (private={private})")
     else:
         log(f"GitHub 仓库 {github_username}/{repo} 不存在，开始创建 (private={private})")
         code, payload = github_create_repo(repo, private, github_token, description)
@@ -371,6 +465,8 @@ def ensure_repo(owner, repo, creds, config_arg=None):
     ]
     if existing:
         log(f"Push Mirror 已存在 ({remote_address})，跳过创建")
+    elif dry_run:
+        log(f"dry-run: 将创建 Push Mirror ({remote_address})")
     else:
         log(f"Push Mirror 不存在，开始创建 ({remote_address})")
         code, payload = gitea_add_push_mirror(
@@ -401,7 +497,12 @@ def main(argv=None):
     parser.add_argument("--credentials", help="本地凭据文件路径")
     parser.add_argument(
         "--config",
-        help="本地同步配置文件；缺省通过 Gitea API 读取仓库内 .github-sync.yml",
+        help="本地同步配置文件（仅单仓库模式生效）；缺省通过 Gitea API 读取仓库内 .github-sync.yml",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只打印将执行的动作，不发起任何创建/删除",
     )
     args = parser.parse_args(argv)
 
@@ -424,9 +525,11 @@ def main(argv=None):
 
     # ---- 单仓库模式（post-receive hook 等按需触发） ----
     if args.repo_name:
-        return 0 if ensure_repo(repo_owner, args.repo_name, creds, args.config) else 1
+        return 0 if ensure_repo(repo_owner, args.repo_name, creds, args.config, args.dry_run) else 1
 
     # ---- 全量模式（cron / 手动），遍历所有者全部仓库 ----
+    if args.config:
+        log("全量模式忽略 --config，逐仓库通过 Gitea API 读取 .github-sync.yml")
     gitea_api_url = (creds.get("GITEA_API_URL") or "").rstrip("/")
     repos = gitea_list_repos(gitea_api_url, repo_owner, creds.get("GITEA_TOKEN"))
     log(f"共发现 {len(repos)} 个仓库（{repo_owner}）")
@@ -446,7 +549,7 @@ def main(argv=None):
             log(f"{repo_owner}/{name}: 空仓库（无默认分支），跳过")
             skipped.append(name)
             continue
-        if ensure_repo(repo_owner, name, creds, args.config):
+        if ensure_repo(repo_owner, name, creds, None, args.dry_run):
             updated.append(name)
         else:
             errors.append(name)
