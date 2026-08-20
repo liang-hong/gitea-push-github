@@ -576,5 +576,12 @@ GitHub does not support creating repositories on push, so a small idempotent "en
 - The target branch must already exist on GitHub (mirror synced) before the GitHub default branch can be set; otherwise skipped with a warning and retried on next run. Gitea side is updated regardless (branch exists locally).
 - Current repo `gitea-push-github` config sets `default_branch: no-ci` on both branches.
 
+## 20. Token Expiry Handling (2026-08-20)
+
+- Script validates the GitHub token via `GET /rate_limit` at the start of `enable`; on 401 it removes the matching Gitea Push Mirror, sends an SMTP expiry notice (optional, from `SMTP_*` credentials), leaves GitHub cloud data untouched, and exits 1.
+- After the user updates the credentials file, the next run recreates the Push Mirror with the new token (mirror missing → auto create).
+- GitHub does not support programmatic PAT creation/renewal; fine-grained tokens expire (max 1 year) and must be regenerated manually on the web.
+- SMTP is optional (e.g. QQ mail `smtp.qq.com` 465/587 with authorization code); without it, expiry is only logged.
+
 # End of Context
 
