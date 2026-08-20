@@ -9,6 +9,9 @@
 #   disable  - 同 remove（默认值；文件缺失或未写 state 时等同此值）
 #
 # 注意：state 写成其他任何值（如 foo / true）都会导致脚本报错（退出码 1）。
+#
+# 多分支仓库：仅当全部分支都有本文件且内容一致（忽略注释）时才执行策略；
+# 任一分支缺失或不一致 → 按 disable 处理（不报错）。请同步所有分支。
 github:
   state: disable   # enable / suspend / remove / disable；默认 disable（等同 remove）
   private: true    # GitHub 云端仓库可见性（创建时生效，之后每次收敛也生效）；默认 true

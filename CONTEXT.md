@@ -563,5 +563,11 @@ GitHub does not support creating repositories on push, so a small idempotent "en
 - In `enable` state the script also reconciles GitHub repo visibility: existing repo is `PATCH`ed to the configured `private` value (public→private is automatic; private→public requires explicit `private: false` and logs a warning).
 - Safety: scan-all mode ignores local `--config` (each repo config read via Gitea API) to prevent one config from affecting all repos; added `--dry-run` to preview changes before any mutation.
 
+## 17. Multi-branch Consistency and README Consolidation (2026-08-20)
+
+- `--config` removed; repo config is always read from the repo-root `.github-sync.yml` via the Gitea API (no other location or filename), because each repo carries its own push policy.
+- Multi-branch rule: the push policy executes only when **every branch** has `.github-sync.yml` and their contents are identical (comments ignored); any branch missing or differing → treated as `disable` (no error).
+- README consolidated: all deployment and modification steps merged into one chapter “部署与使用”.
+
 # End of Context
 
