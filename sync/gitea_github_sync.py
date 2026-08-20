@@ -64,6 +64,7 @@ import base64
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import quote
@@ -96,11 +97,14 @@ def get_env(name, default=None):
 
 
 def log(message):
-    print(f"[sync] {message}")
+    # 系统时间 + 本地时区名/偏移（如 2026-08-21 01:23:09 CST (+0800)）
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S %Z (%z)")
+    print(f"[sync] {stamp} {message}")
 
 
 def fail(message, exit_code=1):
-    print(f"[sync] 错误: {message}", file=sys.stderr)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S %Z (%z)")
+    print(f"[sync] {stamp} 错误: {message}", file=sys.stderr)
     sys.exit(exit_code)
 
 
