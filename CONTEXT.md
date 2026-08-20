@@ -582,6 +582,7 @@ GitHub does not support creating repositories on push, so a small idempotent "en
 - After the user updates the credentials file, the next run recreates the Push Mirror with the new token (mirror missing → auto create).
 - GitHub does not support programmatic PAT creation/renewal; fine-grained tokens expire (max 1 year) and must be regenerated manually on the web.
 - SMTP is optional (e.g. QQ mail `smtp.qq.com` 465/587 with authorization code); without it, expiry is only logged.
+- The expiry notice is sent **once per expiry period**: a marker file `~/.local/state/gitea-push-github/token_expired` records that it was sent, is skipped on later runs while the token stays invalid, and is cleared automatically once the token becomes valid again.
 
 # End of Context
 

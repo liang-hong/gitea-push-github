@@ -268,6 +268,20 @@ class RepoConfigApiTest(unittest.TestCase):
     def test_send_expiry_email_without_smtp_config(self):
         sync.send_expiry_email({}, "alice", "repo")  # 仅记日志，不抛异常
 
+    def test_expiry_state_marker(self):
+        tmp = tempfile.mkdtemp()
+        state = os.path.join(tmp, "state", "token_expired")
+        try:
+            with mock.patch.object(sync, "TOKEN_EXPIRY_STATE", state):
+                self.assertFalse(sync.token_expiry_notified())
+                sync.mark_token_expiry_notified()
+                self.assertTrue(sync.token_expiry_notified())
+                sync.clear_token_expiry_notified()
+                self.assertFalse(sync.token_expiry_notified())
+        finally:
+            if os.path.isfile(state):
+                os.unlink(state)
+
 
 
 class SyncMainTest(unittest.TestCase):
@@ -636,12 +650,15 @@ class SyncMainTest(unittest.TestCase):
             repo_texts={"repo": {"main": "github:\n  state: enable\n"}},
             token_valid=False,
         )
-        with mock.patch.object(sync, "send_expiry_email") as send_mail:
-            with fake_urlopen(side_effect=handler):
-                rc = sync.main(self.base_args() + ["--repo-name", "repo"])
+        state = os.path.join(self.tmp, "state", "token_expired")
+        with mock.patch.object(sync, "TOKEN_EXPIRY_STATE", state):
+            with mock.patch.object(sync, "send_expiry_email") as send_mail:
+                with fake_urlopen(side_effect=handler):
+                    rc = sync.main(self.base_args() + ["--repo-name", "repo"])
         self.assertEqual(rc, 1)
         self.assertEqual(sum(1 for c in calls if c.method == "DELETE"), 1)
         send_mail.assert_called_once()
+        self.assertTrue(os.path.isfile(state))  # 已写提醒标记
 
     def test_single_repo_enable_token_expired_dry_run_no_mutation(self):
         def base_handler(request, **kwargs):
@@ -658,11 +675,68 @@ class SyncMainTest(unittest.TestCase):
             repo_texts={"repo": {"main": "github:\n  state: enable\n"}},
             token_valid=False,
         )
-        with mock.patch.object(sync, "send_expiry_email") as send_mail:
-            with fake_urlopen(side_effect=handler):
-                rc = sync.main(self.base_args() + ["--repo-name", "repo", "--dry-run"])
+        state = os.path.join(self.tmp, "state", "token_expired")
+        with mock.patch.object(sync, "TOKEN_EXPIRY_STATE", state):
+            with mock.patch.object(sync, "send_expiry_email") as send_mail:
+                with fake_urlopen(side_effect=handler):
+                    rc = sync.main(self.base_args() + ["--repo-name", "repo", "--dry-run"])
         self.assertEqual(rc, 1)
         send_mail.assert_not_called()
+        self.assertFalse(os.path.isfile(state))  # dry-run 不写标记
+
+    def test_single_repo_enable_token_expired_notifies_once(self):
+        state = os.path.join(self.tmp, "state", "token_expired")
+        os.makedirs(os.path.dirname(state), exist_ok=True)
+        with open(state, "w", encoding="utf-8") as handle:
+            handle.write("already notified\n")
+
+        def base_handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [{
+                    "remote_address": "https://github.com/octocat/repo.git",
+                    "remote_name": "push_mirror_1",
+                }])
+            if request.method == "DELETE" and url.endswith("/push_mirrors/push_mirror_1"):
+                return make_response(204, None)
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        handler = with_api_config(
+            base_handler,
+            repo_texts={"repo": {"main": "github:\n  state: enable\n"}},
+            token_valid=False,
+        )
+        with mock.patch.object(sync, "TOKEN_EXPIRY_STATE", state):
+            with mock.patch.object(sync, "send_expiry_email") as send_mail:
+                with fake_urlopen(side_effect=handler):
+                    rc = sync.main(self.base_args() + ["--repo-name", "repo"])
+        self.assertEqual(rc, 1)
+        send_mail.assert_not_called()  # 已提醒过，不重复发
+
+    def test_single_repo_enable_clears_expiry_marker(self):
+        state = os.path.join(self.tmp, "state", "token_expired")
+        os.makedirs(os.path.dirname(state), exist_ok=True)
+        with open(state, "w", encoding="utf-8") as handle:
+            handle.write("old\n")
+
+        def base_handler(request, **kwargs):
+            url = request.full_url
+            if request.method == "GET" and url.endswith("/repos/octocat/repo") and "api.github.com" in url:
+                return make_response(200, {"private": True})
+            if request.method == "GET" and url.endswith("/repos/alice/repo") and "git.example.com" in url:
+                return make_response(200, {"default_branch": "main"})
+            if request.method == "GET" and "push_mirrors" in url:
+                return make_response(200, [{"remote_address": "https://github.com/octocat/repo.git"}])
+            raise AssertionError(f"unexpected {request.method} {url}")
+
+        handler = with_api_config(
+            base_handler, repo_texts={"repo": {"main": "github:\n  state: enable\n"}}
+        )
+        with mock.patch.object(sync, "TOKEN_EXPIRY_STATE", state):
+            with fake_urlopen(side_effect=handler):
+                rc = sync.main(self.base_args() + ["--repo-name", "repo"])
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.isfile(state))  # token 有效，清除标记
 
     def test_single_repo_suspend_deletes_matching_mirror(self):
         calls = []

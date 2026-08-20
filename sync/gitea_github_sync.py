@@ -90,6 +90,9 @@ DEFAULT_STATE = "remove"
 # git 常见默认主分支名；分支参数为空时回退（优先 main，其次 master）
 DEFAULT_BRANCH_CANDIDATES = ("main", "master")
 
+# token 过期提醒状态文件：存在=已提醒过（过期期间只发一次，token 恢复后自动清除）
+TOKEN_EXPIRY_STATE = "~/.local/state/gitea-push-github/token_expired"
+
 
 def get_env(name, default=None):
     value = os.environ.get(name, "")
@@ -315,6 +318,26 @@ def github_token_valid(token):
     """校验 GitHub token 是否有效（无效/过期返回 False）。GET /rate_limit 无需 scope。"""
     code, _ = http_request("GET", f"{GITHUB_API}/rate_limit", github_headers(token))
     return code == 200
+
+
+def token_expiry_notified():
+    """是否已发送过 token 过期提醒（状态文件存在）。"""
+    return os.path.isfile(os.path.expanduser(TOKEN_EXPIRY_STATE))
+
+
+def mark_token_expiry_notified():
+    """记录已发送提醒（写入状态文件）。"""
+    path = os.path.expanduser(TOKEN_EXPIRY_STATE)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(time.strftime("%Y-%m-%d %H:%M:%S %Z") + "\n")
+
+
+def clear_token_expiry_notified():
+    """token 恢复有效时清除提醒标记。"""
+    path = os.path.expanduser(TOKEN_EXPIRY_STATE)
+    if os.path.isfile(path):
+        os.remove(path)
 
 
 def send_expiry_email(creds, owner, repo):
@@ -608,16 +631,21 @@ def ensure_repo(owner, repo, creds, dry_run=False):
         return suspend_push_mirror(gitea_api_url, owner, repo, gitea_token, remote_address, dry_run)
 
     # ---- state == "enable" ----
-    # 先校验 GitHub token：过期则删除 Push Mirror 并邮件提醒，不动云端 GitHub 数据
+    # 先校验 GitHub token：过期则删除 Push Mirror 并邮件提醒（只发一次），不动云端 GitHub 数据
     if not github_token_valid(github_token):
         log("GitHub Token 无效或已过期（HTTP 401），删除 Push Mirror 暂停同步")
         suspend_push_mirror(gitea_api_url, owner, repo, gitea_token, remote_address, dry_run)
-        if dry_run:
+        if token_expiry_notified():
+            log("token 过期提醒已发送过，本次跳过（更新凭据后自动恢复）")
+        elif dry_run:
             log("dry-run: 将发送 token 过期邮件提醒")
         else:
             send_expiry_email(creds, owner, repo)
+            mark_token_expiry_notified()
         log("请更新凭据文件后重试（下次运行自动重建 Push Mirror）")
         return False
+    if not dry_run:
+        clear_token_expiry_notified()
 
     private = config_private(config)
     default_branch = config_default_branch(config)

@@ -85,7 +85,7 @@ Gitea（本地主仓库）
 3. `state: enable` → 检查/创建 GitHub 仓库并**收敛可见性**（PATCH）、按配置**收敛默认分支**（Gitea + GitHub PATCH）、**description 与 Gitea 一致**，检查/创建 Push Mirror；
 4. `state: suspend` → 删除指向本方案 GitHub 仓库的 Push Mirror（保留 GitHub 仓库，停止更新）；
 5. `state: remove` / `disable`（缺省）→ 不创建也不删除任何内容；
-6. GitHub Token 无效/过期（401）→ 删除该仓库 Push Mirror、SMTP 邮件提醒（可选配置）、**不动云端 GitHub 数据**；更新凭据后下次运行自动重建。
+6. GitHub Token 无效/过期（401）→ 删除该仓库 Push Mirror、SMTP 邮件提醒（可选配置，**只发一次**）、**不动云端 GitHub 数据**；更新凭据后下次运行自动重建。
 
 **触发方式**（任选或并用）：
 - cron 全量扫描：新仓库最多延迟一个 cron 周期；
@@ -175,7 +175,7 @@ github:
 - **多分支仓库**：仅当**全部分支**都有 `.github-sync.yml` 且内容一致（忽略注释）时才执行策略；任一分支缺失或不一致 → 按 `disable` 处理（不报错）；
 - 可见性：公开仓库 + 配置 `private: true` → 自动改回私有；私有仓库改公开需显式 `private: false`，脚本会打印警告；
 - `default_branch`（可选）：**同时设置 Gitea 与 GitHub** 云端仓库默认分支；仅 `state=enable` 时生效；GitHub 侧需该分支已同步到 GitHub（否则本次跳过并警告，镜像同步后下次运行生效）。分支参数为空时按 git 常见默认主分支名处理（优先 `main`，其次 `master`）。
-- **Token 过期自动处理**：`enable` 时先校验 GitHub Token（`GET /rate_limit`）；无效/过期（401）→ 删除该仓库 Push Mirror、SMTP 邮件提醒（需 SMTP 配置）、**不动云端 GitHub 数据**，退出码 1；更新 `.env` 后下次运行自动重建 Push Mirror。
+- **Token 过期自动处理**：`enable` 时先校验 GitHub Token（`GET /rate_limit`）；无效/过期（401）→ 删除该仓库 Push Mirror、SMTP 邮件提醒（需 SMTP 配置）、**不动云端 GitHub 数据**，退出码 1；**提醒只发一次**（状态记录于 `~/.local/state/gitea-push-github/token_expired`，token 恢复有效后自动清除，下次过期再提醒）；更新 `.env` 后下次运行自动重建 Push Mirror。
 
 ### 5.3 申请 Token（GitHub / Gitea）
 
