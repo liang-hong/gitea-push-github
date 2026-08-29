@@ -60,7 +60,7 @@ Gitea（本地主仓库）
       GitHub 云端仓库（默认私有）
 
 服务器定时任务（可选）：
-  cron 每 10 分钟 ──► sync/gitea_github_sync.py 全量扫描（幂等）
+  cron 每天一次 ──► sync/gitea_github_sync.py 全量扫描（幂等）
                         │  GitHub 官方 API：检查/创建/收敛仓库
                         │  Gitea 官方 API：检查/创建/删除 Push Mirror
                         └─ 凭据只读自 ~/.config/gitea-push-github/gitea-push-github.env
@@ -220,10 +220,10 @@ github:
 mkdir -p ~/.local/log
 
 # crontab -e 追加（见 examples/crontab.txt；替换 <owner> 与脚本绝对路径）
-*/10 * * * * /usr/bin/python3 /path/to/gitea-push-github/sync/gitea_github_sync.py --repo-owner <owner> >> ~/.local/log/gitea-push-github.log 2>&1
+0 3 * * * /usr/bin/python3 /path/to/gitea-push-github/sync/gitea_github_sync.py --repo-owner <owner> >> ~/.local/log/gitea-push-github.log 2>&1
 ```
 
-新仓库创建后最多延迟一个 cron 周期（建议 5–15 分钟）自动完成；幂等，重复运行无副作用；空/归档/镜像仓库自动跳过。
+全量扫描仅用于初始化（建 GitHub 库 + 配 Push Mirror），已配置好的仓库由 Gitea Push Mirror 即时同步，故每天一次（凌晨 3 点）即可；新仓库创建后最多延迟一个 cron 周期自动完成，如需即时初始化可给该仓库配 post-receive hook（见方式二）。幂等，重复运行无副作用；空/归档/镜像仓库自动跳过。
 
 **方式二：post-receive hook**（push 后即时处理）
 
